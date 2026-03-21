@@ -1,0 +1,49 @@
+{
+  "name": "@findtime/mcp-server",
+  "version": "3.25.1",
+  "description": "Production-parity MCP server for the findtime.io Time API",
+  "bin": {
+    "findtime-mcp": "server.js"
+  },
+  "main": "./server.js",
+  "type": "commonjs",
+  "files": [
+    "server.js",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.3"
+  },
+  "scripts": {
+    "start": "node ./server.js",
+    "test": "node --test ./server.test.js",
+    "test:smoke": "node --test ./smoke.test.js",
+    "pack": "npm pack --dry-run",
+    "publish:dry-run": "npm publish --dry-run --access public",
+    "prepublishOnly": "node --test ./server.test.js"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hkchao/findtime-mcp-server.git"
+  },
+  "homepage": "https://findtime.io/developers/mcp/",
+  "bugs": {
+    "url": "https://github.com/hkchao/findtime-mcp-server/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "time",
+    "timezone",
+    "dst",
+    "meeting-planner",
+    "findtime"
+  ],
+  "license": "UNLICENSED"
+}
