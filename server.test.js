@@ -193,6 +193,51 @@ test('find_meeting_time forwards pipe-delimited arrays to the meeting endpoint',
   assert.equal(response.result.structuredContent.shape, 'find_meeting_time.v2');
 });
 
+test('get_dst_schedule forwards both at and year to the DST endpoint', async () => {
+  const calls = [];
+  const server = createFindtimeMcpServer({
+    apiBaseUrl: 'https://time-api.findtime.io',
+    fetchImpl: async (url) => {
+      calls.push(url);
+      return {
+        ok: true,
+        status: 200,
+        async text() {
+          return JSON.stringify({
+            shape: 'dst_schedule.v2',
+            resolved: true,
+            dst: {
+              observesDST: true,
+              year: 2025,
+              transitions: []
+            }
+          });
+        }
+      };
+    }
+  });
+
+  const response = await server.handleMessage({
+    jsonrpc: '2.0',
+    id: 35,
+    method: 'tools/call',
+    params: {
+      name: 'get_dst_schedule',
+      arguments: {
+        timezone: 'Europe/London',
+        at: '2025-03-22T12:00:00Z',
+        year: 2025
+      }
+    }
+  });
+
+  assert.equal(
+    calls[0],
+    'https://time-api.findtime.io/timezone/dst?timezone=Europe%2FLondon&at=2025-03-22T12%3A00%3A00Z&year=2025'
+  );
+  assert.equal(response.result.structuredContent.dst.year, 2025);
+});
+
 test('tool errors are returned as MCP tool errors instead of JSON-RPC failures', async () => {
   const server = createFindtimeMcpServer({
     apiBaseUrl: 'https://time-api.findtime.io',

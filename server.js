@@ -131,6 +131,10 @@ const TOOL_DEFINITIONS = [
         at: {
           type: 'string',
           description: 'Optional ISO timestamp used as the reference instant.'
+        },
+        year: {
+          type: 'integer',
+          description: 'Optional calendar year used to return DST transitions for that civil year.'
         }
       },
       additionalProperties: false
@@ -143,6 +147,7 @@ const TOOL_DEFINITIONS = [
       setParam(params, 'timezone', args.timezone);
       setParam(params, 'countryCode', args.countryCode);
       setParam(params, 'at', args.at);
+      setParam(params, 'year', args.year);
       return { path: '/timezone/dst', params };
     }
   },
