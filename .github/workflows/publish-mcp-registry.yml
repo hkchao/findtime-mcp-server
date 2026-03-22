@@ -2,12 +2,19 @@ name: Publish to MCP Registry
 
 on:
   workflow_dispatch:
-  push:
-    tags:
-      - "v*"
+  workflow_run:
+    workflows:
+      - Publish MCP Server
+    types:
+      - completed
 
 jobs:
   publish:
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' &&
+        github.event.workflow_run.conclusion == 'success' &&
+        github.event.workflow_run.event == 'push')
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -16,6 +23,13 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
 
       - name: Verify server.json version matches package.json
         run: |
