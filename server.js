@@ -17,12 +17,19 @@ const SUPPORTED_PROTOCOL_VERSIONS = new Set([
 
 loadEnvironmentFiles();
 
-const PACKAGE_METADATA = safeReadJson(LOCAL_PACKAGE_PATH) || safeReadJson(REPO_PACKAGE_PATH) || {};
+const LOCAL_PACKAGE_METADATA = safeReadJson(LOCAL_PACKAGE_PATH) || null;
+const REPO_PACKAGE_METADATA = safeReadJson(REPO_PACKAGE_PATH) || null;
+const PACKAGE_METADATA = LOCAL_PACKAGE_METADATA || REPO_PACKAGE_METADATA || {};
 const SERVER_VERSION = PACKAGE_METADATA.version || '0.0.0';
 const MCP_PACKAGE_NAME = PACKAGE_METADATA.name || '@findtime/mcp-server';
 const MCP_NPM_REGISTRY_LATEST_URL = `https://registry.npmjs.org/${encodeURIComponent(MCP_PACKAGE_NAME)}/latest`;
 const MCP_NPM_URL = `https://www.npmjs.com/package/${MCP_PACKAGE_NAME}`;
 const MCP_REGISTRY_URL = 'https://registry.modelcontextprotocol.io/?q=io.github.hkchao%2Ffindtime-mcp-server';
+const MCP_INSTALL_MODE = determineInstallMode({
+  packageRoot: PACKAGE_ROOT,
+  localPackageMetadata: LOCAL_PACKAGE_METADATA,
+  repoPackageMetadata: REPO_PACKAGE_METADATA
+});
 const DEFAULT_API_BASE_URL = firstNonEmpty(
   process.env.TIME_API_BASE_URL,
   process.env.FINDTIME_TIME_API_BASE_URL
@@ -903,6 +910,8 @@ function createFindtimeMcpServer(options = {}) {
         mcpLatestVersionHint: latestVersion
           ? null
           : 'Could not verify the latest published MCP version automatically. Check the npm package page or Official MCP Registry listing directly.',
+        mcpInstallMode: MCP_INSTALL_MODE,
+        mcpExecutablePath: path.join(PACKAGE_ROOT, 'server.js'),
         mcpRegistryUrl: MCP_REGISTRY_URL,
         mcpNpmUrl: MCP_NPM_URL,
         apiBaseUrl,
@@ -1079,6 +1088,22 @@ function tryParseJson(value) {
   } catch (_error) {
     return undefined;
   }
+}
+
+function determineInstallMode({ packageRoot, localPackageMetadata, repoPackageMetadata }) {
+  if (repoPackageMetadata && repoPackageMetadata.name === 'world-time-ai') {
+    return 'repo_checkout';
+  }
+
+  if (localPackageMetadata && localPackageMetadata.name === '@findtime/mcp-server') {
+    return 'npm_package';
+  }
+
+  if (typeof packageRoot === 'string' && packageRoot.includes(`${path.sep}world-time-ai${path.sep}services${path.sep}mcp-server`)) {
+    return 'repo_checkout';
+  }
+
+  return 'package_install';
 }
 
 function startStdioServer(options = {}) {
