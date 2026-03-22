@@ -1,0 +1,44 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.hkchao/findtime-mcp-server",
+  "title": "findtime MCP Server",
+  "description": "Production-parity MCP server for current time, DST, conversion, overlap, meeting planning, and location search powered by the findtime.io Time API.",
+  "repository": {
+    "url": "https://github.com/hkchao/findtime-mcp-server",
+    "source": "github"
+  },
+  "version": "3.25.2",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@findtime/mcp-server",
+      "version": "3.25.2",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "FINDTIME_TIME_API_KEY",
+          "description": "findtime.io developer API key used to authenticate requests to the Time API.",
+          "isRequired": true,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "FINDTIME_TIME_API_BASE_URL",
+          "description": "Optional override for the Time API base URL. Defaults to https://time-api.findtime.io.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        },
+        {
+          "name": "FINDTIME_MCP_CLIENT_TYPE",
+          "description": "Optional client hint for transport behavior, such as cursor or codex.",
+          "isRequired": false,
+          "isSecret": false,
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}
