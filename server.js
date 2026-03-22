@@ -30,6 +30,7 @@ const DEFAULT_API_KEY = firstNonEmpty(
   process.env.FINDTIME_MCP_API_KEY,
   process.env.FINDTIME_TIME_API_KEY
 );
+const TIMEZONE_HELPERS_PATH = path.join(REPO_ROOT, 'slack-bot', 'timezone-helpers.js');
 
 const TOOL_DEFINITIONS = [
   {
@@ -72,7 +73,7 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: 'get_current_time',
-    description: 'Return the production current time payload for a single city, query, or timezone.',
+    description: 'Return the production current time payload for a single city, query, or timezone. Exact country-name queries may be retried through a canonical city when the resolver can do so deterministically.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -82,7 +83,7 @@ const TOOL_DEFINITIONS = [
         },
         query: {
           type: 'string',
-          description: 'Free-form location query or timezone abbreviation.'
+          description: 'Free-form location query, country name, or timezone abbreviation.'
         },
         timezone: {
           type: 'string',
@@ -260,7 +261,7 @@ const TOOL_DEFINITIONS = [
         },
         countryCode: {
           type: 'string',
-          description: 'Optional ISO country hint.'
+          description: 'Optional ISO country hint used for ranking and disambiguation. This is not a strict filter.'
         },
         limit: {
           type: 'integer',
@@ -305,6 +306,7 @@ const TOOL_DEFINITIONS = [
 ];
 
 const TOOL_DEFINITIONS_BY_NAME = new Map(TOOL_DEFINITIONS.map((tool) => [tool.name, tool]));
+let cachedResolveLocation;
 
 function safeReadJson(filePath) {
   try {
@@ -564,7 +566,7 @@ function summarizeToolPayload(toolName, payload) {
   return `${toolName} response\n${JSON.stringify(payload, null, 2)}`;
 }
 
-function buildToolErrorResult(toolName, apiResponse) {
+function buildToolErrorResult(toolName, apiResponse, options = {}) {
   const summary = {
     ok: false,
     tool: toolName,
@@ -575,6 +577,10 @@ function buildToolErrorResult(toolName, apiResponse) {
 
   if (apiResponse.networkError) {
     summary.networkError = apiResponse.networkError;
+  }
+
+  if (options.hint) {
+    summary.hint = options.hint;
   }
 
   return {
@@ -589,12 +595,14 @@ function buildToolErrorResult(toolName, apiResponse) {
   };
 }
 
-function buildToolSuccessResult(toolName, payload, apiMeta) {
+function buildToolSuccessResult(toolName, payload, apiMeta, options = {}) {
   const structuredContent = {
     ...payload,
     _meta: {
+      ...(payload && typeof payload === 'object' && payload._meta ? payload._meta : {}),
       endpoint: apiMeta.endpoint,
-      url: apiMeta.url
+      url: apiMeta.url,
+      ...(options.meta || {})
     }
   };
 
@@ -609,6 +617,109 @@ function buildToolSuccessResult(toolName, payload, apiMeta) {
   };
 }
 
+function loadResolveLocation() {
+  if (cachedResolveLocation !== undefined) {
+    return cachedResolveLocation;
+  }
+
+  try {
+    const timezoneHelpers = require(TIMEZONE_HELPERS_PATH);
+    cachedResolveLocation = typeof timezoneHelpers.resolveLocation === 'function'
+      ? timezoneHelpers.resolveLocation
+      : null;
+  } catch (_error) {
+    cachedResolveLocation = null;
+  }
+
+  return cachedResolveLocation;
+}
+
+function normalizeCountryCode(value) {
+  return typeof value === 'string' && value.trim()
+    ? value.trim().toUpperCase()
+    : null;
+}
+
+function resolveCountryStyleInput(input, resolveLocationImpl) {
+  if (typeof resolveLocationImpl !== 'function') {
+    return null;
+  }
+
+  const resolved = resolveLocationImpl(String(input || '').trim());
+  const resolutionType = String(resolved && resolved.type ? resolved.type : '');
+  if (!resolved || !resolutionType.startsWith('country-')) {
+    return null;
+  }
+
+  const city = firstNonEmpty(resolved.city);
+  const timezone = firstNonEmpty(resolved.timezone);
+  const countryCode = normalizeCountryCode(resolved.countryCode);
+
+  if (!city && !timezone) {
+    return null;
+  }
+
+  return {
+    city,
+    timezone,
+    countryCode,
+    resolutionType
+  };
+}
+
+function buildCountryQueryHint(rawInput, resolvedCountry) {
+  if (!rawInput || !resolvedCountry) {
+    return null;
+  }
+
+  const suggestions = [];
+  if (resolvedCountry.city) suggestions.push(resolvedCountry.city);
+  if (resolvedCountry.timezone && !suggestions.includes(resolvedCountry.timezone)) {
+    suggestions.push(resolvedCountry.timezone);
+  }
+
+  return {
+    reason: 'country_query_not_supported',
+    input: rawInput,
+    suggest: suggestions,
+    resolutionType: resolvedCountry.resolutionType,
+    retriedWith: {
+      city: resolvedCountry.city || null,
+      countryCode: resolvedCountry.countryCode || null,
+      timezone: resolvedCountry.timezone || null
+    }
+  };
+}
+
+function enrichLocationSearchPayload(payload, args) {
+  if (!payload || typeof payload !== 'object') {
+    return { payload, meta: null };
+  }
+
+  const hintedCountryCode = normalizeCountryCode(args && args.countryCode);
+  if (!hintedCountryCode || !Array.isArray(payload.results)) {
+    return { payload, meta: null };
+  }
+
+  const countryFilteredResults = payload.results.filter(
+    (result) => normalizeCountryCode(result && result.countryCode) === hintedCountryCode
+  );
+  const primaryMatch = countryFilteredResults[0] || null;
+
+  return {
+    payload: {
+      ...payload,
+      primaryMatch,
+      countryFilteredResults
+    },
+    meta: {
+      countryCodeBehavior: 'ranking_hint',
+      countryHint: hintedCountryCode,
+      countryFilteredCount: countryFilteredResults.length
+    }
+  };
+}
+
 function createFindtimeMcpServer(options = {}) {
   const fetchImpl = options.fetchImpl || global.fetch;
   const apiBaseUrl = options.apiBaseUrl || DEFAULT_API_BASE_URL;
@@ -616,6 +727,9 @@ function createFindtimeMcpServer(options = {}) {
   const apiKey = options.apiKey === undefined ? DEFAULT_API_KEY : options.apiKey;
   const serverName = options.serverName || 'findtime';
   const serverTitle = options.serverTitle || 'findtime Time API MCP';
+  const resolveLocationImpl = options.resolveLocationImpl === undefined
+    ? loadResolveLocation()
+    : options.resolveLocationImpl;
 
   if (typeof fetchImpl !== 'function') {
     throw new Error('Fetch implementation is required to run the MCP server.');
@@ -694,15 +808,61 @@ function createFindtimeMcpServer(options = {}) {
     }
 
     const request = tool.buildRequest(args || {});
-    const apiResponse = await fetchJson(name, request);
+    let apiResponse = await fetchJson(name, request);
 
     if (!apiResponse.ok) {
+      if (name === 'get_current_time' && apiResponse.status === 404) {
+        const rawCountryQuery = firstNonEmpty(args.query, args.city);
+        const resolvedCountry = resolveCountryStyleInput(rawCountryQuery, resolveLocationImpl);
+
+        if (resolvedCountry && resolvedCountry.city) {
+          const retryRequest = tool.buildRequest({
+            city: resolvedCountry.city,
+            countryCode: resolvedCountry.countryCode || undefined
+          });
+          const retryResponse = await fetchJson(name, retryRequest);
+
+          if (retryResponse.ok) {
+            return buildToolSuccessResult(name, retryResponse.parsedBody, {
+              endpoint: retryRequest.path,
+              url: retryResponse.url
+            }, {
+              meta: {
+                fallbackResolution: {
+                  input: rawCountryQuery,
+                  strategy: resolvedCountry.resolutionType,
+                  retriedWith: {
+                    city: resolvedCountry.city,
+                    countryCode: resolvedCountry.countryCode || null
+                  }
+                }
+              }
+            });
+          }
+
+          return buildToolErrorResult(name, retryResponse, {
+            hint: buildCountryQueryHint(rawCountryQuery, resolvedCountry)
+          });
+        }
+      }
+
       return buildToolErrorResult(name, apiResponse);
     }
 
-    return buildToolSuccessResult(name, apiResponse.parsedBody, {
+    let payload = apiResponse.parsedBody;
+    let meta = null;
+
+    if (name === 'search_timezones') {
+      const enriched = enrichLocationSearchPayload(payload, args);
+      payload = enriched.payload;
+      meta = enriched.meta;
+    }
+
+    return buildToolSuccessResult(name, payload, {
       endpoint: request.path,
       url: apiResponse.url
+    }, {
+      meta
     });
   }
 

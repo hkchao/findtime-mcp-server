@@ -104,6 +104,52 @@ test('search_timezones calls the production search endpoint with normalized para
   assert.equal(calls[0].init.headers.Authorization, 'Bearer test-key');
   assert.equal(response.result.isError, undefined);
   assert.equal(response.result.structuredContent.shape, 'locations_search.v2');
+  assert.equal(response.result.structuredContent._meta.countryCodeBehavior, 'ranking_hint');
+  assert.equal(response.result.structuredContent._meta.countryHint, 'CA');
+});
+
+test('search_timezones exposes primaryMatch and countryFilteredResults when a country hint is supplied', async () => {
+  const server = createFindtimeMcpServer({
+    apiBaseUrl: 'https://time-api.findtime.io',
+    fetchImpl: async () => ({
+      ok: true,
+      status: 200,
+      async text() {
+        return JSON.stringify({
+          shape: 'locations_search.v2',
+          results: [
+            {
+              id: 'findtime:victoria|CA|America/Vancouver',
+              name: 'Victoria',
+              countryCode: 'CA'
+            },
+            {
+              id: 'findtime:victoria|SC|Indian/Mahe',
+              name: 'Victoria',
+              countryCode: 'SC'
+            }
+          ]
+        });
+      }
+    })
+  });
+
+  const response = await server.handleMessage({
+    jsonrpc: '2.0',
+    id: 33,
+    method: 'tools/call',
+    params: {
+      name: 'search_timezones',
+      arguments: {
+        query: 'Victoria',
+        countryCode: 'CA'
+      }
+    }
+  });
+
+  assert.equal(response.result.structuredContent.primaryMatch.countryCode, 'CA');
+  assert.equal(response.result.structuredContent.countryFilteredResults.length, 1);
+  assert.equal(response.result.structuredContent.countryFilteredResults[0].countryCode, 'CA');
 });
 
 test('find_meeting_time forwards pipe-delimited arrays to the meeting endpoint', async () => {
@@ -174,6 +220,71 @@ test('tool errors are returned as MCP tool errors instead of JSON-RPC failures',
   assert.equal(response.error, undefined);
   assert.equal(response.result.isError, true);
   assert.equal(response.result.structuredContent.status, 401);
+});
+
+test('get_current_time retries exact country queries through a canonical city when the resolver can do so deterministically', async () => {
+  const calls = [];
+  const server = createFindtimeMcpServer({
+    apiBaseUrl: 'https://time-api.findtime.io',
+    resolveLocationImpl: (input) => (
+      String(input).trim() === 'Japan'
+        ? {
+            city: 'Tokyo',
+            timezone: 'Asia/Tokyo',
+            countryCode: 'JP',
+            type: 'country-capital'
+          }
+        : null
+    ),
+    fetchImpl: async (url) => {
+      calls.push(url);
+      if (calls.length === 1) {
+        return {
+          ok: false,
+          status: 404,
+          async text() {
+            return JSON.stringify({ notFound: true });
+          }
+        };
+      }
+
+      return {
+        ok: true,
+        status: 200,
+        async text() {
+          return JSON.stringify({
+            shape: 'current_time.v2',
+            resolved: true,
+            location: {
+              name: 'Tokyo',
+              countryCode: 'JP',
+              timezoneIana: 'Asia/Tokyo'
+            }
+          });
+        }
+      };
+    }
+  });
+
+  const response = await server.handleMessage({
+    jsonrpc: '2.0',
+    id: 34,
+    method: 'tools/call',
+    params: {
+      name: 'get_current_time',
+      arguments: {
+        query: 'Japan'
+      }
+    }
+  });
+
+  assert.deepEqual(calls, [
+    'https://time-api.findtime.io/time/current?query=Japan',
+    'https://time-api.findtime.io/time/current?city=Tokyo&countryCode=JP'
+  ]);
+  assert.equal(response.result.structuredContent.location.name, 'Tokyo');
+  assert.equal(response.result.structuredContent._meta.fallbackResolution.input, 'Japan');
+  assert.equal(response.result.structuredContent._meta.fallbackResolution.strategy, 'country-capital');
 });
 
 test('content-length framing parses multiple messages from one chunk', () => {
@@ -249,7 +360,7 @@ test('stdio server mirrors content-length framing when initialize arrives with c
 function invokeServerOverStdio({ serverPath, input, env }) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [serverPath], {
-      cwd: __dirname,
+      cwd: path.join(__dirname, '..', '..'),
       env: {
         ...process.env,
         ...env
