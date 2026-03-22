@@ -34,6 +34,18 @@ const TIMEZONE_HELPERS_PATH = path.join(REPO_ROOT, 'slack-bot', 'timezone-helper
 
 const TOOL_DEFINITIONS = [
   {
+    name: 'get_api_diagnostics',
+    description: 'Return MCP and findtime Time API diagnostics, including package version, API base URL, auth configuration, and a live health check.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+      additionalProperties: false
+    },
+    buildRequest() {
+      return { path: '/health', params: new URLSearchParams() };
+    }
+  },
+  {
     name: 'time_snapshot',
     description: 'Return the production time snapshot payload for one location or a list of locations.',
     inputSchema: {
@@ -810,6 +822,42 @@ function createFindtimeMcpServer(options = {}) {
     const tool = TOOL_DEFINITIONS_BY_NAME.get(name);
     if (!tool) {
       throw invalidParamsError(`Unknown tool: ${name}`);
+    }
+
+    if (name === 'get_api_diagnostics') {
+      const request = tool.buildRequest(args || {});
+      const apiResponse = await fetchJson(name, request);
+      const checkedAt = new Date().toISOString();
+      const diagnostics = {
+        ok: apiResponse.ok,
+        tool: name,
+        checkedAt,
+        mcpVersion: SERVER_VERSION,
+        apiBaseUrl,
+        apiConfigured: Boolean(apiBaseUrl),
+        apiAuthConfigured: Boolean(typeof apiKey === 'string' && apiKey.trim()),
+        clientType: firstNonEmpty(
+          process.env.FINDTIME_MCP_CLIENT_TYPE,
+          process.env.TIME_API_CLIENT_TYPE
+        ) || null,
+        apiHealthUrl: apiResponse.url,
+        apiStatus: apiResponse.status,
+        apiReachable: apiResponse.ok
+      };
+
+      if (apiResponse.ok) {
+        diagnostics.apiHealth = apiResponse.parsedBody;
+      } else {
+        diagnostics.error = apiResponse.parsedBody !== undefined ? apiResponse.parsedBody : apiResponse.rawBody;
+        if (apiResponse.networkError) {
+          diagnostics.networkError = apiResponse.networkError;
+        }
+      }
+
+      return buildToolSuccessResult(name, diagnostics, {
+        endpoint: request.path,
+        url: apiResponse.url
+      });
     }
 
     const request = tool.buildRequest(args || {});
