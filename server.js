@@ -19,6 +19,10 @@ loadEnvironmentFiles();
 
 const PACKAGE_METADATA = safeReadJson(LOCAL_PACKAGE_PATH) || safeReadJson(REPO_PACKAGE_PATH) || {};
 const SERVER_VERSION = PACKAGE_METADATA.version || '0.0.0';
+const MCP_PACKAGE_NAME = PACKAGE_METADATA.name || '@findtime/mcp-server';
+const MCP_NPM_REGISTRY_LATEST_URL = `https://registry.npmjs.org/${encodeURIComponent(MCP_PACKAGE_NAME)}/latest`;
+const MCP_NPM_URL = `https://www.npmjs.com/package/${MCP_PACKAGE_NAME}`;
+const MCP_REGISTRY_URL = 'https://registry.modelcontextprotocol.io/?q=io.github.hkchao%2Ffindtime-mcp-server';
 const DEFAULT_API_BASE_URL = firstNonEmpty(
   process.env.TIME_API_BASE_URL,
   process.env.FINDTIME_TIME_API_BASE_URL
@@ -35,7 +39,7 @@ const TIMEZONE_HELPERS_PATH = path.join(REPO_ROOT, 'slack-bot', 'timezone-helper
 const TOOL_DEFINITIONS = [
   {
     name: 'get_api_diagnostics',
-    description: 'Return MCP and findtime Time API diagnostics, including package version, API base URL, auth configuration, and a live health check.',
+    description: 'Return MCP and findtime Time API diagnostics, including the running MCP version, latest published MCP version, API base URL, auth configuration, and a live health check.',
     inputSchema: {
       type: 'object',
       properties: {},
@@ -818,6 +822,61 @@ function createFindtimeMcpServer(options = {}) {
     }
   }
 
+  async function fetchLatestMcpVersion() {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+    try {
+      const response = await fetchImpl(MCP_NPM_REGISTRY_LATEST_URL, {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json'
+        },
+        signal: controller.signal
+      });
+
+      const rawBody = await response.text();
+      const parsedBody = tryParseJson(rawBody);
+
+      if (!response.ok) {
+        return {
+          ok: false,
+          status: response.status,
+          latestVersion: null
+        };
+      }
+
+      const latestVersion = parsedBody && typeof parsedBody.version === 'string'
+        ? parsedBody.version.trim()
+        : '';
+
+      if (!latestVersion) {
+        return {
+          ok: false,
+          status: response.status,
+          latestVersion: null
+        };
+      }
+
+      return {
+        ok: true,
+        status: response.status,
+        latestVersion
+      };
+    } catch (error) {
+      return {
+        ok: false,
+        status: null,
+        latestVersion: null,
+        networkError: error && error.name === 'AbortError'
+          ? `Request timed out after ${timeoutMs}ms`
+          : String(error && error.message ? error.message : error)
+      };
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
   async function callTool(name, args = {}) {
     const tool = TOOL_DEFINITIONS_BY_NAME.get(name);
     if (!tool) {
@@ -826,13 +885,26 @@ function createFindtimeMcpServer(options = {}) {
 
     if (name === 'get_api_diagnostics') {
       const request = tool.buildRequest(args || {});
-      const apiResponse = await fetchJson(name, request);
+      const [apiResponse, latestMcpVersionCheck] = await Promise.all([
+        fetchJson(name, request),
+        fetchLatestMcpVersion()
+      ]);
       const checkedAt = new Date().toISOString();
+      const latestVersion = latestMcpVersionCheck.latestVersion || null;
       const diagnostics = {
         ok: apiResponse.ok,
         tool: name,
         checkedAt,
         mcpVersion: SERVER_VERSION,
+        mcpLatestVersion: latestVersion,
+        mcpUpToDate: latestVersion ? latestVersion === SERVER_VERSION : null,
+        mcpLatestVersionCheck: latestVersion ? 'ok' : 'failed',
+        mcpLatestVersionSource: latestVersion ? 'npm' : 'unavailable',
+        mcpLatestVersionHint: latestVersion
+          ? null
+          : 'Could not verify the latest published MCP version automatically. Check the npm package page or Official MCP Registry listing directly.',
+        mcpRegistryUrl: MCP_REGISTRY_URL,
+        mcpNpmUrl: MCP_NPM_URL,
         apiBaseUrl,
         apiConfigured: Boolean(apiBaseUrl),
         apiAuthConfigured: Boolean(typeof apiKey === 'string' && apiKey.trim()),
@@ -852,6 +924,10 @@ function createFindtimeMcpServer(options = {}) {
         if (apiResponse.networkError) {
           diagnostics.networkError = apiResponse.networkError;
         }
+      }
+
+      if (!latestVersion && latestMcpVersionCheck.networkError) {
+        diagnostics.mcpLatestVersionNetworkError = latestMcpVersionCheck.networkError;
       }
 
       return buildToolSuccessResult(name, diagnostics, {

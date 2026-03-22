@@ -57,13 +57,25 @@ test('initialize negotiates protocol version and advertises tools capability', a
   assert.equal(response.result.serverInfo.name, 'findtime');
 });
 
-test('get_api_diagnostics reports MCP version, API base URL, auth configuration, and health payload', async () => {
+test('get_api_diagnostics reports MCP version, latest published MCP version, API base URL, auth configuration, and health payload', async () => {
   const calls = [];
   const server = createFindtimeMcpServer({
     apiBaseUrl: 'https://time-api.findtime.io',
     apiKey: 'test-key',
     fetchImpl: async (url, init) => {
       calls.push({ url, init });
+      if (url === 'https://registry.npmjs.org/%40findtime%2Fmcp-server/latest') {
+        return {
+          ok: true,
+          status: 200,
+          async text() {
+            return JSON.stringify({
+              version: '3.25.8'
+            });
+          }
+        };
+      }
+
       return {
         ok: true,
         status: 200,
@@ -87,14 +99,66 @@ test('get_api_diagnostics reports MCP version, API base URL, auth configuration,
     }
   });
 
-  assert.equal(calls.length, 1);
+  assert.equal(calls.length, 2);
   assert.equal(calls[0].url, 'https://time-api.findtime.io/health');
+  assert.equal(calls[1].url, 'https://registry.npmjs.org/%40findtime%2Fmcp-server/latest');
   assert.match(response.result.structuredContent.mcpVersion, /^\d+\.\d+\.\d+/);
+  assert.equal(response.result.structuredContent.mcpLatestVersion, '3.25.8');
+  assert.equal(response.result.structuredContent.mcpLatestVersionCheck, 'ok');
+  assert.equal(response.result.structuredContent.mcpUpToDate, response.result.structuredContent.mcpVersion === '3.25.8');
   assert.equal(response.result.structuredContent.apiBaseUrl, 'https://time-api.findtime.io');
   assert.equal(response.result.structuredContent.apiAuthConfigured, true);
   assert.equal(response.result.structuredContent.apiReachable, true);
   assert.equal(response.result.structuredContent.apiHealth.service, 'time-api');
   assert.equal(response.result.structuredContent._meta.endpoint, '/health');
+});
+
+test('get_api_diagnostics returns manual verification hints when the latest MCP version lookup fails', async () => {
+  const server = createFindtimeMcpServer({
+    apiBaseUrl: 'https://time-api.findtime.io',
+    fetchImpl: async (url) => {
+      if (url === 'https://registry.npmjs.org/%40findtime%2Fmcp-server/latest') {
+        throw new Error('lookup failed');
+      }
+
+      return {
+        ok: true,
+        status: 200,
+        async text() {
+          return JSON.stringify({
+            ok: true,
+            service: 'time-api'
+          });
+        }
+      };
+    }
+  });
+
+  const response = await server.handleMessage({
+    jsonrpc: '2.0',
+    id: 222,
+    method: 'tools/call',
+    params: {
+      name: 'get_api_diagnostics',
+      arguments: {}
+    }
+  });
+
+  assert.equal(response.result.structuredContent.mcpLatestVersion, null);
+  assert.equal(response.result.structuredContent.mcpLatestVersionCheck, 'failed');
+  assert.equal(response.result.structuredContent.mcpLatestVersionSource, 'unavailable');
+  assert.match(
+    response.result.structuredContent.mcpLatestVersionHint,
+    /Check the npm package page or Official MCP Registry listing directly/
+  );
+  assert.equal(
+    response.result.structuredContent.mcpNpmUrl,
+    'https://www.npmjs.com/package/@findtime/mcp-server'
+  );
+  assert.match(
+    response.result.structuredContent.mcpRegistryUrl,
+    /registry\.modelcontextprotocol\.io/
+  );
 });
 
 test('search_timezones calls the production search endpoint with normalized params', async () => {
