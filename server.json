@@ -2,18 +2,18 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.hkchao/findtime-mcp-server",
   "title": "findtime MCP Server",
-  "description": "MCP server for time, DST, conversion, meeting planning, and location search on findtime.io.",
+  "description": "MCP server for time in cities around the world, time zones, DST, conversion, and meetings.",
   "repository": {
     "url": "https://github.com/hkchao/findtime-mcp-server",
     "source": "github"
   },
   "websiteUrl": "https://findtime.io",
-  "version": "3.25.4",
+  "version": "3.25.5",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@findtime/mcp-server",
-      "version": "3.25.4",
+      "version": "3.25.5",
       "transport": {
         "type": "stdio"
       },
