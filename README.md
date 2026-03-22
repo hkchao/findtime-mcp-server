@@ -4,6 +4,13 @@
 
 The package intentionally proxies the production API instead of re-implementing time logic locally. Current time, DST, conversion, overlap, meeting search, and location resolution should stay aligned with the live API.
 
+Published surfaces:
+
+- npm: `@findtime/mcp-server`
+- GitHub: `https://github.com/hkchao/findtime-mcp-server`
+- Official MCP Registry: `https://registry.modelcontextprotocol.io/?q=io.github.hkchao%2Ffindtime-mcp-server`
+- MCP Registry name: `io.github.hkchao/findtime-mcp-server`
+
 ## Tool surface
 
 - `time_snapshot`
@@ -150,6 +157,7 @@ This repository is intended to be the canonical public source for `@findtime/mcp
 Recommended setup:
 
 - keep `@findtime/mcp-server` as the npm package name
+- keep `io.github.hkchao/findtime-mcp-server` as the MCP Registry server name
 - add `repository` and `bugs` metadata after creating the GitHub repo
 - add an `NPM_TOKEN` secret to the GitHub repository
 - publish through GitHub Actions or a maintainer terminal from this repo root
