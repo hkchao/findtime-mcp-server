@@ -8,12 +8,12 @@
     "source": "github"
   },
   "websiteUrl": "https://findtime.io",
-  "version": "3.25.11",
+  "version": "3.25.12",
   "packages": [
     {
       "registryType": "npm",
       "identifier": "@findtime/mcp-server",
-      "version": "3.25.11",
+      "version": "3.25.12",
       "transport": {
         "type": "stdio"
       },
