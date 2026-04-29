@@ -13,6 +13,7 @@ Published surfaces:
 
 ## Tool surface
 
+- `answer_time_question`
 - `time_snapshot`
 - `get_current_time`
 - `get_dst_schedule`
@@ -21,6 +22,8 @@ Published surfaces:
 - `find_meeting_time`
 - `search_timezones`
 - `get_location_by_id`
+
+Prefer `answer_time_question` for messy natural-language prompts such as "3pm PST to London", "what is the IANA timezone for San Francisco?", "working hours overlap for SF, Berlin, and Tokyo", or "what does CST mean?". The tool classifies the prompt through findtime.io's domain logic, dispatches to deterministic Time API behavior, and returns structured ambiguity or clarification when the world is genuinely ambiguous.
 
 ## Install in MCP clients
 
@@ -41,7 +44,9 @@ Optional environment variables:
 - `TIME_API_BASE_URL`
 - `TIME_API_TIMEOUT_MS`
 - `FINDTIME_MCP_CLIENT_TYPE`
-- `FINDTIME_MCP_INSTRUMENTATION_ENABLED`
+- `FINDTIME_MCP_CLIENT_ID` or `FINDTIME_MCP_INSTALL_ID` to provide a stable client identifier. If omitted, the server creates one locally under the user's state directory.
+- `FINDTIME_MCP_INSTRUMENTATION_ENABLED=false` to opt out of anonymous usage telemetry.
+- `FINDTIME_MCP_USAGE_TELEMETRY_URL` to override the default telemetry endpoint.
 
 ### Cursor
 
@@ -55,8 +60,7 @@ Optional environment variables:
       "env": {
         "FINDTIME_MCP_CLIENT_TYPE": "cursor",
         "FINDTIME_TIME_API_BASE_URL": "https://time-api.findtime.io",
-        "FINDTIME_TIME_API_KEY": "YOUR_FINDTIME_SECRET_KEY",
-        "FINDTIME_MCP_INSTRUMENTATION_ENABLED": "false"
+        "FINDTIME_TIME_API_KEY": "YOUR_FINDTIME_SECRET_KEY"
       }
     }
   }
@@ -75,7 +79,6 @@ enabled = true
 FINDTIME_MCP_CLIENT_TYPE = "codex"
 FINDTIME_TIME_API_BASE_URL = "https://time-api.findtime.io"
 FINDTIME_TIME_API_KEY = "YOUR_FINDTIME_SECRET_KEY"
-FINDTIME_MCP_INSTRUMENTATION_ENABLED = "false"
 ```
 
 ### Claude Desktop
@@ -91,8 +94,7 @@ FINDTIME_MCP_INSTRUMENTATION_ENABLED = "false"
       "args": ["-y", "@findtime/mcp-server"],
       "env": {
         "FINDTIME_TIME_API_BASE_URL": "https://time-api.findtime.io",
-        "FINDTIME_TIME_API_KEY": "YOUR_FINDTIME_SECRET_KEY",
-        "FINDTIME_MCP_INSTRUMENTATION_ENABLED": "false"
+        "FINDTIME_TIME_API_KEY": "YOUR_FINDTIME_SECRET_KEY"
       }
     }
   }
@@ -115,15 +117,16 @@ Best meeting time between New York, Sydney, and Mumbai?
 
 ## Local development
 
-Run the server directly from the repo root:
+Run the workspace version directly:
 
 ```bash
-npm start
+npm run mcp:start
 ```
 
 The server attempts to load `.env.development.local`, `.env.development`, `.env.local`, and `.env` from:
 
 - the current working directory
+- `services/mcp-server`
 - the repo root
 
 ## Tests
@@ -131,18 +134,19 @@ The server attempts to load `.env.development.local`, `.env.development`, `.env.
 Protocol and transport tests:
 
 ```bash
-npm test
+npm run test:mcp-server
 ```
 
 Live production-parity smoke tests:
 
 ```bash
-npm run test:smoke
+npm run test:mcp-server:smoke
 ```
 
 The smoke suite checks:
 
 - `search_timezones`
+- `answer_time_question`
 - `get_current_time`
 - `get_dst_schedule`
 - `convert_time`
@@ -152,17 +156,15 @@ The smoke suite checks:
 
 ## Maintainer release flow
 
-This repository is intended to be the canonical public source for `@findtime/mcp-server`.
+The canonical public source for this package now lives in:
 
-Recommended setup:
+- GitHub: `https://github.com/hkchao/findtime-mcp-server`
+- npm: `@findtime/mcp-server`
+- Official MCP Registry: `https://registry.modelcontextprotocol.io/?q=io.github.hkchao%2Ffindtime-mcp-server`
 
-- keep `@findtime/mcp-server` as the npm package name
-- keep `io.github.hkchao/findtime-mcp-server` as the MCP Registry server name
-- add `repository` and `bugs` metadata after creating the GitHub repo
-- add an `NPM_TOKEN` secret to the GitHub repository
-- publish through GitHub Actions or a maintainer terminal from this repo root
+Publish and version updates should happen from that public repo, not from this private app repo.
 
-Standard local publish flow:
+Standard publish flow in the public repo:
 
 ```bash
 npm test
@@ -170,12 +172,11 @@ npm pack --dry-run
 npm publish --access public
 ```
 
-GitHub Actions release flow:
+The equivalent local verification checks in this repo are:
 
 ```bash
-npm test
-npm pack --dry-run
-npm publish --access public
+npm run test:mcp-server
+npm run mcp:pack
 ```
 
-Use the workflow in `.github/workflows/publish.yml` for repo-backed publishes.
+Treat this repo as the implementation source that originally produced the MCP package, not as the canonical public release source.

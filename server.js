@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 const fs = require('node:fs');
 const path = require('node:path');
+const os = require('node:os');
+const crypto = require('node:crypto');
 
 const PACKAGE_ROOT = __dirname;
 const LOCAL_PACKAGE_PATH = path.join(PACKAGE_ROOT, 'package.json');
@@ -35,6 +37,11 @@ const DEFAULT_API_BASE_URL = firstNonEmpty(
   process.env.FINDTIME_TIME_API_BASE_URL
 ) || 'https://time-api.findtime.io';
 const DEFAULT_TIMEOUT_MS = parseInteger(process.env.TIME_API_TIMEOUT_MS, 15000);
+const MCP_USAGE_TELEMETRY_URL = firstNonEmpty(
+  process.env.FINDTIME_MCP_USAGE_TELEMETRY_URL,
+  process.env.FINDTIME_USAGE_TELEMETRY_URL
+) || 'https://slack.findtime.io/telemetry/usage';
+const MCP_USAGE_TELEMETRY_TIMEOUT_MS = parseInteger(process.env.FINDTIME_MCP_USAGE_TELEMETRY_TIMEOUT_MS, 1200);
 const DEFAULT_API_KEY = firstNonEmpty(
   process.env.FINDTIME_API_KEY,
   process.env.TIME_API_KEY,
@@ -44,6 +51,47 @@ const DEFAULT_API_KEY = firstNonEmpty(
 const TIMEZONE_HELPERS_PATH = path.join(REPO_ROOT, 'slack-bot', 'timezone-helpers.js');
 
 const TOOL_DEFINITIONS = [
+  {
+    name: 'answer_time_question',
+    description: 'Answer a natural-language time, timezone, conversion, DST, overlap, scheduling, abbreviation, or IANA timezone question. Prefer this for messy user prompts; findtime.io will classify intent and call the right deterministic time API behavior.',
+    inputSchema: {
+      type: 'object',
+      required: ['query'],
+      properties: {
+        query: {
+          type: 'string',
+          description: 'The raw user time-related question or prompt.'
+        },
+        userTimezone: {
+          type: 'string',
+          description: 'Optional IANA timezone for the user, used for relative questions like "my time" or "tomorrow".'
+        },
+        locale: {
+          type: 'string',
+          description: 'Optional user locale hint, such as en-US.'
+        },
+        now: {
+          type: 'string',
+          description: 'Optional ISO timestamp for deterministic relative-date handling.'
+        },
+        date: {
+          type: 'string',
+          description: 'Optional YYYY-MM-DD date context.'
+        }
+      },
+      additionalProperties: false
+    },
+    buildRequest(args) {
+      ensureRequired(args, ['query'], 'answer_time_question requires query.');
+      const params = new URLSearchParams();
+      setParam(params, 'query', args.query);
+      setParam(params, 'userTimezone', args.userTimezone);
+      setParam(params, 'locale', args.locale);
+      setParam(params, 'now', args.now);
+      setParam(params, 'date', args.date);
+      return { path: '/time/answer', params };
+    }
+  },
   {
     name: 'get_api_diagnostics',
     description: 'Return MCP and findtime Time API diagnostics, including the running MCP version, latest published MCP version, API base URL, auth configuration, and a live health check.',
@@ -335,6 +383,7 @@ const TOOL_DEFINITIONS = [
 
 const TOOL_DEFINITIONS_BY_NAME = new Map(TOOL_DEFINITIONS.map((tool) => [tool.name, tool]));
 let cachedResolveLocation;
+let cachedMcpClientId;
 
 function safeReadJson(filePath) {
   try {
@@ -397,6 +446,144 @@ function firstNonEmpty(...values) {
 function parseInteger(value, fallback) {
   const parsed = Number.parseInt(String(value || ''), 10);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function isMcpUsageTelemetryEnabled() {
+  const explicit = firstNonEmpty(
+    process.env.FINDTIME_MCP_USAGE_TELEMETRY_ENABLED,
+    process.env.FINDTIME_MCP_INSTRUMENTATION_ENABLED
+  );
+  const normalized = String(explicit || '').trim().toLowerCase();
+  return !['false', '0', 'off', 'no'].includes(normalized);
+}
+
+function getMcpClientType() {
+  return firstNonEmpty(
+    process.env.FINDTIME_MCP_CLIENT_TYPE,
+    process.env.TIME_API_CLIENT_TYPE
+  ) || 'stdio';
+}
+
+function getMcpClientIdPath() {
+  const explicitDir = firstNonEmpty(process.env.FINDTIME_MCP_STATE_DIR);
+  if (explicitDir) {
+    return path.join(explicitDir, 'mcp-client-id');
+  }
+
+  const xdgStateHome = firstNonEmpty(process.env.XDG_STATE_HOME);
+  const baseDir = xdgStateHome
+    ? path.join(xdgStateHome, 'findtime')
+    : path.join(os.homedir(), '.findtime');
+  return path.join(baseDir, 'mcp-client-id');
+}
+
+function getMcpClientId() {
+  const explicit = firstNonEmpty(
+    process.env.FINDTIME_MCP_CLIENT_ID,
+    process.env.FINDTIME_MCP_INSTALL_ID
+  );
+  if (explicit) return explicit.slice(0, 128);
+
+  if (cachedMcpClientId) return cachedMcpClientId;
+
+  const idPath = getMcpClientIdPath();
+  try {
+    const existing = fs.readFileSync(idPath, 'utf8').trim();
+    if (existing) {
+      cachedMcpClientId = existing.slice(0, 128);
+      return cachedMcpClientId;
+    }
+  } catch (_error) {
+    // First run or unreadable state file. Generate below.
+  }
+
+  cachedMcpClientId = `mcp-${crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex')}`;
+
+  try {
+    fs.mkdirSync(path.dirname(idPath), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(idPath, `${cachedMcpClientId}\n`, { mode: 0o600 });
+  } catch (_error) {
+    // Telemetry remains best-effort; an unwritable home directory should not break MCP.
+  }
+
+  return cachedMcpClientId;
+}
+
+function getRuntimeLocale() {
+  return firstNonEmpty(
+    process.env.LC_ALL,
+    process.env.LC_MESSAGES,
+    process.env.LANG
+  );
+}
+
+function getRuntimeTimezone() {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function getMcpQueryText(args = {}) {
+  if (!args || typeof args !== 'object') return '';
+  return firstNonEmpty(
+    args.query,
+    args.city,
+    args.timezone,
+    args.from,
+    Array.isArray(args.locations) ? args.locations.join('|') : null
+  ) || '';
+}
+
+function buildMcpUsageTelemetryEvent({ toolName, args = {}, result = null, error = null, latencyMs = 0 } = {}) {
+  const queryText = getMcpQueryText(args);
+  const status = error
+    ? 'exception'
+    : result && result.isError
+      ? 'error'
+      : 'ok';
+
+  return {
+    platform: 'mcp-server',
+    route: String(toolName || 'unknown').slice(0, 80),
+    status,
+    source: getMcpClientType().slice(0, 80),
+    textLength: Math.min(2000, queryText.length),
+    userId: getMcpClientId(),
+    appVersion: SERVER_VERSION,
+    browser: 'mcp',
+    browserVersion: MCP_INSTALL_MODE,
+    os: `${os.platform()} ${os.release()}`.slice(0, 80),
+    locale: getRuntimeLocale(),
+    timezone: getRuntimeTimezone(),
+    latencyMs: Math.max(0, Math.round(Number(latencyMs || 0)))
+  };
+}
+
+function recordMcpUsageTelemetry(input) {
+  if (!isMcpUsageTelemetryEnabled() || !MCP_USAGE_TELEMETRY_URL || typeof fetch !== 'function') {
+    return;
+  }
+
+  const event = buildMcpUsageTelemetryEvent(input);
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  const timeout = controller
+    ? setTimeout(() => controller.abort(), MCP_USAGE_TELEMETRY_TIMEOUT_MS)
+    : null;
+
+  fetch(MCP_USAGE_TELEMETRY_URL, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(event),
+    signal: controller ? controller.signal : undefined
+  }).catch((error) => {
+    if (String(process.env.FINDTIME_MCP_DEBUG || '').trim().toLowerCase() === '1') {
+      console.error('[findtime-mcp telemetry] failed:', error && error.message ? error.message : error);
+    }
+  }).finally(() => {
+    if (timeout) clearTimeout(timeout);
+  });
 }
 
 function stringOrStringArraySchema(description) {
@@ -1055,8 +1242,25 @@ function createFindtimeMcpServer(options = {}) {
       if (method === 'tools/call') {
         const toolName = message.params && message.params.name;
         const toolArgs = (message.params && message.params.arguments) || {};
-        const result = await callTool(toolName, toolArgs);
-        return createSuccessResponse(message.id, result);
+        const startedAt = Date.now();
+        try {
+          const result = await callTool(toolName, toolArgs);
+          recordMcpUsageTelemetry({
+            toolName,
+            args: toolArgs,
+            result,
+            latencyMs: Date.now() - startedAt
+          });
+          return createSuccessResponse(message.id, result);
+        } catch (toolError) {
+          recordMcpUsageTelemetry({
+            toolName,
+            args: toolArgs,
+            error: toolError,
+            latencyMs: Date.now() - startedAt
+          });
+          throw toolError;
+        }
       }
 
       throw methodNotFoundError(method);
