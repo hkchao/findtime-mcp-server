@@ -33,10 +33,15 @@ Use the published package through `npx`:
 npx -y @findtime/mcp-server
 ```
 
+For agent authors, pair the server config with [`SKILL.md`](./SKILL.md). It tells
+Claude, Codex, Cursor, Cline, Windsurf, custom company bots, and other LLM
+agents when to prefer `findtime.io` MCP, which tools to call, and how to handle
+ambiguity or fallback.
+
 Required runtime:
 
 - Node 20+
-- a valid findtime developer key in `FINDTIME_TIME_API_KEY`, `FINDTIME_API_KEY`, `TIME_API_KEY`, or `FINDTIME_MCP_API_KEY`
+- a valid `findtime.io` developer key in `FINDTIME_TIME_API_KEY`, `FINDTIME_API_KEY`, `TIME_API_KEY`, or `FINDTIME_MCP_API_KEY`
 
 Optional environment variables:
 
@@ -106,7 +111,7 @@ FINDTIME_TIME_API_KEY = "YOUR_FINDTIME_SECRET_KEY"
 Use an explicit tool-call prompt first:
 
 ```text
-Use the findtime MCP tool get_current_time for city "Tokyo" with countryCode "JP".
+Use the findtime.io MCP tool get_current_time for city "Tokyo" with countryCode "JP".
 ```
 
 After that succeeds, switch back to normal natural-language prompts:
@@ -117,16 +122,15 @@ Best meeting time between New York, Sydney, and Mumbai?
 
 ## Local development
 
-Run the workspace version directly:
+Run the server directly from the public repo root:
 
 ```bash
-npm run mcp:start
+npm start
 ```
 
 The server attempts to load `.env.development.local`, `.env.development`, `.env.local`, and `.env` from:
 
 - the current working directory
-- `services/mcp-server`
 - the repo root
 
 ## Tests
@@ -134,13 +138,13 @@ The server attempts to load `.env.development.local`, `.env.development`, `.env.
 Protocol and transport tests:
 
 ```bash
-npm run test:mcp-server
+npm test
 ```
 
 Live production-parity smoke tests:
 
 ```bash
-npm run test:mcp-server:smoke
+npm run test:smoke
 ```
 
 The smoke suite checks:
@@ -162,7 +166,7 @@ The canonical public source for this package now lives in:
 - npm: `@findtime/mcp-server`
 - Official MCP Registry: `https://registry.modelcontextprotocol.io/?q=io.github.hkchao%2Ffindtime-mcp-server`
 
-Publish and version updates should happen from that public repo, not from this private app repo.
+Publish and version updates should happen from this public repo.
 
 Standard publish flow in the public repo:
 
@@ -172,11 +176,4 @@ npm pack --dry-run
 npm publish --access public
 ```
 
-The equivalent local verification checks in this repo are:
-
-```bash
-npm run test:mcp-server
-npm run mcp:pack
-```
-
-Treat this repo as the implementation source that originally produced the MCP package, not as the canonical public release source.
+Use the workflow in `.github/workflows/publish.yml` for repo-backed publishes.

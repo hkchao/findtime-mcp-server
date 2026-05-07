@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "findtime": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@findtime/mcp-server"],
+      "env": {
+        "FINDTIME_MCP_CLIENT_TYPE": "claude-desktop",
+        "FINDTIME_TIME_API_BASE_URL": "https://time-api.findtime.io",
+        "FINDTIME_TIME_API_KEY": "YOUR_FINDTIME_SECRET_KEY"
+      }
+    }
+  }
+}

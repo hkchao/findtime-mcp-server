@@ -106,7 +106,7 @@ test('get_api_diagnostics reports MCP version, latest published MCP version, API
   assert.equal(response.result.structuredContent.mcpLatestVersion, '3.25.8');
   assert.equal(response.result.structuredContent.mcpLatestVersionCheck, 'ok');
   assert.equal(response.result.structuredContent.mcpUpToDate, response.result.structuredContent.mcpVersion === '3.25.8');
-  assert.equal(response.result.structuredContent.mcpInstallMode, 'npm_package');
+  assert.equal(response.result.structuredContent.mcpInstallMode, 'repo_checkout');
   assert.match(response.result.structuredContent.mcpExecutablePath, /server\.js$/);
   assert.equal(response.result.structuredContent.apiBaseUrl, 'https://time-api.findtime.io');
   assert.equal(response.result.structuredContent.apiAuthConfigured, true);
@@ -161,7 +161,7 @@ test('get_api_diagnostics returns manual verification hints when the latest MCP 
     response.result.structuredContent.mcpRegistryUrl,
     /registry\.modelcontextprotocol\.io/
   );
-  assert.equal(response.result.structuredContent.mcpInstallMode, 'npm_package');
+  assert.equal(response.result.structuredContent.mcpInstallMode, 'repo_checkout');
 });
 
 test('search_timezones calls the production search endpoint with normalized params', async () => {
