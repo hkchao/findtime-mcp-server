@@ -81,6 +81,7 @@ FINDTIME_MCP_TOOL_MODE=answer-only
 In answer-only mode, the MCP server exposes only:
 
 - `answer_time_question`
+- `get_findtime_help`
 - `get_api_diagnostics`
 
 Use this mode when the bot should route all natural-language time requests through the answer API first.
@@ -99,6 +100,7 @@ Examples:
 
 Use specific tools when the agent has already parsed the task into structured inputs:
 
+- `get_findtime_help`: examples of supported intents, answer API usage, ambiguity handling, and enterprise deployment guidance
 - `get_current_time`: current local time for a known city, country, timezone, or location
 - `convert_time`: convert a known date/time from one place or timezone to another
 - `get_dst_schedule`: DST status and transition dates

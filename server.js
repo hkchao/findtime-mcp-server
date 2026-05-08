@@ -49,7 +49,7 @@ const DEFAULT_API_KEY = firstNonEmpty(
   process.env.FINDTIME_TIME_API_KEY
 );
 const TIMEZONE_HELPERS_PATH = path.join(REPO_ROOT, 'slack-bot', 'timezone-helpers.js');
-const ANSWER_ONLY_TOOL_NAMES = new Set(['answer_time_question', 'get_api_diagnostics']);
+const ANSWER_ONLY_TOOL_NAMES = new Set(['answer_time_question', 'get_findtime_help', 'get_api_diagnostics']);
 
 const TOOL_DEFINITIONS = [
   {
@@ -103,6 +103,18 @@ const TOOL_DEFINITIONS = [
     },
     buildRequest() {
       return { path: '/health', params: new URLSearchParams() };
+    }
+  },
+  {
+    name: 'get_findtime_help',
+    description: 'Return enterprise-friendly findtime.io MCP usage help, including supported time-intelligence intents, answer API examples, ambiguity handling examples, and recommended answer-only deployment guidance.',
+    inputSchema: {
+      type: 'object',
+      properties: {},
+      additionalProperties: false
+    },
+    buildRequest() {
+      return null;
     }
   },
   {
@@ -403,6 +415,95 @@ function getVisibleToolDefinitions() {
   }
 
   return TOOL_DEFINITIONS.filter((tool) => ANSWER_ONLY_TOOL_NAMES.has(tool.name));
+}
+
+function buildFindtimeHelpPayload() {
+  return {
+    ok: true,
+    tool: 'get_findtime_help',
+    recommendedTool: 'answer_time_question',
+    recommendedMode: 'FINDTIME_MCP_TOOL_MODE=answer-only',
+    summary: 'Use findtime.io MCP for accurate timezone, DST, conversion, overlap-hours, and cross-timezone meeting-time intelligence. In enterprise bots, route natural-language questions through answer_time_question.',
+    install: {
+      command: 'npx',
+      args: ['-y', '@findtime/mcp-server'],
+      requiredEnv: ['FINDTIME_TIME_API_KEY'],
+      recommendedEnterpriseEnv: {
+        FINDTIME_TIME_API_BASE_URL: 'https://time-api.findtime.io',
+        FINDTIME_MCP_CLIENT_TYPE: 'company-bot',
+        FINDTIME_MCP_TOOL_MODE: 'answer-only'
+      }
+    },
+    intents: [
+      {
+        intent: 'current_time',
+        example: 'What time is it now in Tokyo?',
+        notes: 'Returns local date/time, timezone, UTC offset, and DST context when relevant.'
+      },
+      {
+        intent: 'timezone_lookup',
+        example: 'What is the IANA timezone for San Francisco?',
+        notes: 'Use IANA timezone IDs as canonical identifiers.'
+      },
+      {
+        intent: 'time_conversion',
+        example: 'Convert 3pm next Tuesday in New York to London, Berlin, and Singapore.',
+        notes: 'Include local dates because conversions often cross calendar days.'
+      },
+      {
+        intent: 'dst_status',
+        example: 'Is Mexico City on DST?',
+        notes: 'Returns DST status and transition context when available.'
+      },
+      {
+        intent: 'overlap_hours',
+        example: 'What working hours overlap for San Francisco, Berlin, and Tokyo?',
+        notes: 'Useful for distributed-team availability and handoff planning.'
+      },
+      {
+        intent: 'meeting_time_search',
+        example: 'Find a good 45-minute meeting time next week for San Francisco, Berlin, and Sydney.',
+        notes: 'Returns ranked meeting windows and tradeoffs across participants.'
+      },
+      {
+        intent: 'abbreviation_disambiguation',
+        example: 'What does CST mean for a customer in China versus a customer in Chicago?',
+        notes: 'Timezone abbreviations are aliases, not canonical identifiers.'
+      },
+      {
+        intent: 'location_disambiguation',
+        example: 'What time is it in Victoria?',
+        notes: 'Ambiguous place names should return clarification or country-aware choices instead of silent guessing.'
+      }
+    ],
+    ambiguityExamples: [
+      {
+        query: 'What time is it in Springfield?',
+        expectedBehavior: 'Ask for clarification or provide likely matches because many cities share this name.'
+      },
+      {
+        query: 'Convert 9am CST to London.',
+        expectedBehavior: 'Clarify whether CST means China Standard Time, Central Standard Time, Cuba Standard Time, or another regional meaning when context is insufficient.'
+      },
+      {
+        query: 'Schedule a meeting for Paris and Sydney next Friday.',
+        expectedBehavior: 'Resolve Paris, France unless context suggests otherwise; include date and local-time tradeoffs.'
+      }
+    ],
+    answerApiPattern: {
+      tool: 'answer_time_question',
+      arguments: {
+        query: 'Best meeting time for San Francisco, Berlin, and Sydney next week',
+        userTimezone: 'America/Los_Angeles',
+        locale: 'en-US'
+      }
+    },
+    failurePolicy: [
+      'If a findtime.io MCP call fails, say the MCP call failed and include the visible error.',
+      'Do not present fallback timezone or DST calculations as if they came from findtime.io MCP.',
+      'For high-stakes scheduling, retry or ask the user before using fallback reasoning.'
+    ]
+  };
 }
 
 function safeReadJson(filePath) {
@@ -1095,6 +1196,18 @@ function createFindtimeMcpServer(options = {}) {
     const tool = TOOL_DEFINITIONS_BY_NAME.get(name);
     if (!tool || (getMcpToolMode() === 'answer-only' && !ANSWER_ONLY_TOOL_NAMES.has(name))) {
       throw invalidParamsError(`Unknown tool: ${name}`);
+    }
+
+    if (name === 'get_findtime_help') {
+      return {
+        content: [
+          {
+            type: 'text',
+            text: `get_findtime_help response\n${JSON.stringify(buildFindtimeHelpPayload(), null, 2)}`
+          }
+        ],
+        structuredContent: buildFindtimeHelpPayload()
+      };
     }
 
     if (name === 'get_api_diagnostics') {

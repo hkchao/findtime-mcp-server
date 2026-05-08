@@ -51,7 +51,7 @@ test('answer-only tool mode exposes only the router and diagnostics tools', asyn
 
     assert.deepEqual(
       response.result.tools.map((tool) => tool.name),
-      ['answer_time_question', 'get_api_diagnostics']
+      ['answer_time_question', 'get_api_diagnostics', 'get_findtime_help']
     );
 
     const hiddenToolResponse = await server.handleMessage({
@@ -75,6 +75,30 @@ test('answer-only tool mode exposes only the router and diagnostics tools', asyn
       process.env.FINDTIME_MCP_TOOL_MODE = previousToolMode;
     }
   }
+});
+
+test('get_findtime_help returns supported intents and ambiguity examples without calling the API', async () => {
+  const server = createFindtimeMcpServer({
+    apiBaseUrl: 'https://time-api.findtime.io',
+    fetchImpl: async () => {
+      throw new Error('fetch should not run for get_findtime_help');
+    }
+  });
+
+  const response = await server.handleMessage({
+    jsonrpc: '2.0',
+    id: 103,
+    method: 'tools/call',
+    params: {
+      name: 'get_findtime_help',
+      arguments: {}
+    }
+  });
+
+  assert.equal(response.result.structuredContent.recommendedTool, 'answer_time_question');
+  assert.equal(response.result.structuredContent.recommendedMode, 'FINDTIME_MCP_TOOL_MODE=answer-only');
+  assert.ok(response.result.structuredContent.intents.some((entry) => entry.intent === 'meeting_time_search'));
+  assert.ok(response.result.structuredContent.ambiguityExamples.some((entry) => /CST/.test(entry.query)));
 });
 
 test('initialize negotiates protocol version and advertises tools capability', async () => {

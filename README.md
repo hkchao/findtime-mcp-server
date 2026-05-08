@@ -14,6 +14,7 @@ Published surfaces:
 ## Tool surface
 
 - `answer_time_question`
+- `get_findtime_help`
 - `time_snapshot`
 - `get_current_time`
 - `get_dst_schedule`
@@ -49,7 +50,7 @@ Optional environment variables:
 - `TIME_API_BASE_URL`
 - `TIME_API_TIMEOUT_MS`
 - `FINDTIME_MCP_CLIENT_TYPE`
-- `FINDTIME_MCP_TOOL_MODE=answer-only` to expose only `answer_time_question` and `get_api_diagnostics` for enterprise bots that should route every natural-language request through the answer API.
+- `FINDTIME_MCP_TOOL_MODE=answer-only` to expose only `answer_time_question`, `get_findtime_help`, and `get_api_diagnostics` for enterprise bots that should route every natural-language request through the answer API.
 - `FINDTIME_MCP_CLIENT_ID` or `FINDTIME_MCP_INSTALL_ID` to provide a stable client identifier. If omitted, the server creates one locally under the user's state directory.
 - `FINDTIME_MCP_INSTRUMENTATION_ENABLED=false` to opt out of anonymous usage telemetry.
 - `FINDTIME_MCP_USAGE_TELEMETRY_URL` to override the default telemetry endpoint.
