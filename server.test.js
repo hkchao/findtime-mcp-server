@@ -31,6 +31,52 @@ test('tools/list exposes the production parity tool surface', async () => {
   );
 });
 
+test('answer-only tool mode exposes only the router and diagnostics tools', async () => {
+  const previousToolMode = process.env.FINDTIME_MCP_TOOL_MODE;
+  process.env.FINDTIME_MCP_TOOL_MODE = 'answer-only';
+
+  try {
+    const server = createFindtimeMcpServer({
+      apiBaseUrl: 'https://time-api.findtime.io',
+      fetchImpl: async () => {
+        throw new Error('fetch should not run for tools/list');
+      }
+    });
+
+    const response = await server.handleMessage({
+      jsonrpc: '2.0',
+      id: 101,
+      method: 'tools/list'
+    });
+
+    assert.deepEqual(
+      response.result.tools.map((tool) => tool.name),
+      ['answer_time_question', 'get_api_diagnostics']
+    );
+
+    const hiddenToolResponse = await server.handleMessage({
+      jsonrpc: '2.0',
+      id: 102,
+      method: 'tools/call',
+      params: {
+        name: 'get_current_time',
+        arguments: {
+          query: 'Tokyo'
+        }
+      }
+    });
+
+    assert.equal(hiddenToolResponse.error.code, -32602);
+    assert.match(hiddenToolResponse.error.message, /Unknown tool: get_current_time/);
+  } finally {
+    if (previousToolMode === undefined) {
+      delete process.env.FINDTIME_MCP_TOOL_MODE;
+    } else {
+      process.env.FINDTIME_MCP_TOOL_MODE = previousToolMode;
+    }
+  }
+});
+
 test('initialize negotiates protocol version and advertises tools capability', async () => {
   const server = createFindtimeMcpServer({
     fetchImpl: async () => {
@@ -107,7 +153,7 @@ test('get_api_diagnostics reports MCP version, latest published MCP version, API
   assert.equal(response.result.structuredContent.mcpLatestVersionCheck, 'ok');
   assert.equal(response.result.structuredContent.mcpUpToDate, response.result.structuredContent.mcpVersion === '3.25.8');
   assert.equal(response.result.structuredContent.mcpInstallMode, 'repo_checkout');
-  assert.match(response.result.structuredContent.mcpExecutablePath, /server\.js$/);
+  assert.match(response.result.structuredContent.mcpExecutablePath, /(?:services\/mcp-server\/)?server\.js$/);
   assert.equal(response.result.structuredContent.apiBaseUrl, 'https://time-api.findtime.io');
   assert.equal(response.result.structuredContent.apiAuthConfigured, true);
   assert.equal(response.result.structuredContent.apiReachable, true);

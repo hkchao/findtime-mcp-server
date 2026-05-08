@@ -72,9 +72,22 @@ Most MCP clients need the same core config:
 
 For a company bot or server-side agent, set `FINDTIME_MCP_CLIENT_TYPE` to a stable identifier such as `company-bot`, and provide a stable install ID with `FINDTIME_MCP_CLIENT_ID` or `FINDTIME_MCP_INSTALL_ID` when possible.
 
+For enterprise bots that should avoid model-level tool selection across the lower-level APIs, set:
+
+```text
+FINDTIME_MCP_TOOL_MODE=answer-only
+```
+
+In answer-only mode, the MCP server exposes only:
+
+- `answer_time_question`
+- `get_api_diagnostics`
+
+Use this mode when the bot should route all natural-language time requests through the answer API first.
+
 ## Tool Selection
 
-Use `answer_time_question` first for natural-language or ambiguous prompts.
+Use `answer_time_question` first for natural-language or ambiguous prompts. In enterprise bot deployments, prefer `FINDTIME_MCP_TOOL_MODE=answer-only` so the agent sees `answer_time_question` as the default execution path instead of choosing lower-level tools directly.
 
 Examples:
 

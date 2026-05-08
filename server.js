@@ -49,6 +49,7 @@ const DEFAULT_API_KEY = firstNonEmpty(
   process.env.FINDTIME_TIME_API_KEY
 );
 const TIMEZONE_HELPERS_PATH = path.join(REPO_ROOT, 'slack-bot', 'timezone-helpers.js');
+const ANSWER_ONLY_TOOL_NAMES = new Set(['answer_time_question', 'get_api_diagnostics']);
 
 const TOOL_DEFINITIONS = [
   {
@@ -384,6 +385,25 @@ const TOOL_DEFINITIONS = [
 const TOOL_DEFINITIONS_BY_NAME = new Map(TOOL_DEFINITIONS.map((tool) => [tool.name, tool]));
 let cachedResolveLocation;
 let cachedMcpClientId;
+
+function getMcpToolMode() {
+  const mode = String(firstNonEmpty(
+    process.env.FINDTIME_MCP_TOOL_MODE,
+    process.env.FINDTIME_MCP_TOOLS
+  ) || 'full').trim().toLowerCase();
+
+  return ['answer-only', 'answer_only', 'answer'].includes(mode)
+    ? 'answer-only'
+    : 'full';
+}
+
+function getVisibleToolDefinitions() {
+  if (getMcpToolMode() !== 'answer-only') {
+    return TOOL_DEFINITIONS;
+  }
+
+  return TOOL_DEFINITIONS.filter((tool) => ANSWER_ONLY_TOOL_NAMES.has(tool.name));
+}
 
 function safeReadJson(filePath) {
   try {
@@ -1073,7 +1093,7 @@ function createFindtimeMcpServer(options = {}) {
 
   async function callTool(name, args = {}) {
     const tool = TOOL_DEFINITIONS_BY_NAME.get(name);
-    if (!tool) {
+    if (!tool || (getMcpToolMode() === 'answer-only' && !ANSWER_ONLY_TOOL_NAMES.has(name))) {
       throw invalidParamsError(`Unknown tool: ${name}`);
     }
 
@@ -1231,7 +1251,7 @@ function createFindtimeMcpServer(options = {}) {
 
       if (method === 'tools/list') {
         return createSuccessResponse(message.id, {
-          tools: TOOL_DEFINITIONS.map(({ name, description, inputSchema }) => ({
+          tools: getVisibleToolDefinitions().map(({ name, description, inputSchema }) => ({
             name,
             description,
             inputSchema
