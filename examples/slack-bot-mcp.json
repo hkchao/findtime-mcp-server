@@ -1,0 +1,33 @@
+{
+  "description": "Illustrative multi-user Slack bot pattern. Run one long-lived findtime.io MCP server process and inject _endUserId per Slack user on each tool call.",
+  "mcpServer": {
+    "name": "findtime",
+    "type": "stdio",
+    "command": "npx",
+    "args": ["-y", "@findtime/mcp-server"],
+    "env": {
+      "FINDTIME_MCP_CLIENT_TYPE": "slack-bot",
+      "FINDTIME_TIME_API_BASE_URL": "https://time-api.findtime.io",
+      "FINDTIME_TIME_API_KEY": "YOUR_FINDTIME_SECRET_KEY",
+      "FINDTIME_BINDING_TYPE": "slack_team",
+      "FINDTIME_BINDING_VALUE": "T01ABC123"
+    }
+  },
+  "hostPattern": {
+    "notes": [
+      "Do not spawn one MCP subprocess per Slack user.",
+      "Hash the Slack user ID in the bot host, then inject the opaque hash into tool-call arguments.",
+      "Never pass raw Slack user IDs, names, emails, or other PII as _endUserId."
+    ],
+    "toolCall": {
+      "name": "answer_time_question",
+      "arguments": {
+        "query": "What time is it in Tokyo?",
+        "_endUserId": "sha256_slack_user_hash_16_to_32_hex"
+      }
+    },
+    "upstreamHeader": {
+      "X-Findtime-End-User-ID": "sha256_slack_user_hash_16_to_32_hex"
+    }
+  }
+}

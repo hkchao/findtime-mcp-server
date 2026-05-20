@@ -1,7 +1,6 @@
 {
   "mcpServers": {
     "findtime": {
-      "type": "stdio",
       "command": "npx",
       "args": ["-y", "@findtime/mcp-server"],
       "env": {

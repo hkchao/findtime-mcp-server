@@ -31,6 +31,36 @@ test('tools/list exposes the production parity tool surface', async () => {
   );
 });
 
+test('tools/list declares optional _endUserId metadata on every tool schema', async () => {
+  const server = createFindtimeMcpServer({
+    apiBaseUrl: 'https://time-api.findtime.io',
+    fetchImpl: async () => {
+      throw new Error('fetch should not run for tools/list');
+    }
+  });
+
+  const response = await server.handleMessage({
+    jsonrpc: '2.0',
+    id: 1001,
+    method: 'tools/list'
+  });
+
+  for (const tool of response.result.tools) {
+    assert.equal(tool.inputSchema.properties._endUserId.type, 'string');
+    assert.match(tool.inputSchema.properties._endUserId.description, /populated by the MCP host, not the LLM/);
+    assert.equal(tool.inputSchema.required?.includes('_endUserId') || false, false);
+    assert.equal(tool.inputSchema.additionalProperties, false);
+  }
+});
+
+test('convert_time tool description tells models to preserve returned date fields', async () => {
+  const convertTool = TOOL_DEFINITIONS.find((tool) => tool.name === 'convert_time');
+
+  assert.ok(convertTool, 'expected convert_time tool definition');
+  assert.match(convertTool.description, /copy localTime\.weekday/);
+  assert.match(convertTool.description, /do not recompute or shift day names/);
+});
+
 test('answer-only tool mode exposes only the router and diagnostics tools', async () => {
   const previousToolMode = process.env.FINDTIME_MCP_TOOL_MODE;
   process.env.FINDTIME_MCP_TOOL_MODE = 'answer-only';
@@ -98,7 +128,18 @@ test('get_findtime_help returns supported intents and ambiguity examples without
   assert.equal(response.result.structuredContent.recommendedTool, 'answer_time_question');
   assert.equal(response.result.structuredContent.recommendedMode, 'FINDTIME_MCP_TOOL_MODE=answer-only');
   assert.ok(response.result.structuredContent.intents.some((entry) => entry.intent === 'meeting_time_search'));
+  assert.ok(response.result.structuredContent.intents.some((entry) => entry.intent === 'timezone_abbreviation_lookup'));
   assert.ok(response.result.structuredContent.ambiguityExamples.some((entry) => /CST/.test(entry.query)));
+  assert.match(response.result.content[0].text, /^findtime\.io Time Help/);
+  assert.match(response.result.content[0].text, /Try asking:/);
+  assert.match(response.result.content[0].text, /What timezone is Auckland in\?/);
+  assert.match(response.result.content[0].text, /What timezone abbreviation is Auckland\?/);
+  assert.match(response.result.content[0].text, /If a place or timezone is ambiguous/);
+  assert.doesNotMatch(response.result.content[0].text, /\(current_time\)/);
+  assert.doesNotMatch(response.result.content[0].text, /\(meeting_time_search\)/);
+  assert.doesNotMatch(response.result.content[0].text, /FINDTIME_MCP_TOOL_MODE/);
+  assert.doesNotMatch(response.result.content[0].text, /Required secret/);
+  assert.doesNotMatch(response.result.content[0].text, /^\{/);
 });
 
 test('initialize negotiates protocol version and advertises tools capability', async () => {
@@ -140,7 +181,7 @@ test('get_api_diagnostics reports MCP version, latest published MCP version, API
           status: 200,
           async text() {
             return JSON.stringify({
-              version: '3.25.8'
+              version: '3.26.1'
             });
           }
         };
@@ -173,9 +214,9 @@ test('get_api_diagnostics reports MCP version, latest published MCP version, API
   assert.equal(calls[0].url, 'https://time-api.findtime.io/health');
   assert.equal(calls[1].url, 'https://registry.npmjs.org/%40findtime%2Fmcp-server/latest');
   assert.match(response.result.structuredContent.mcpVersion, /^\d+\.\d+\.\d+/);
-  assert.equal(response.result.structuredContent.mcpLatestVersion, '3.25.8');
+  assert.equal(response.result.structuredContent.mcpLatestVersion, '3.26.1');
   assert.equal(response.result.structuredContent.mcpLatestVersionCheck, 'ok');
-  assert.equal(response.result.structuredContent.mcpUpToDate, response.result.structuredContent.mcpVersion === '3.25.8');
+  assert.equal(response.result.structuredContent.mcpUpToDate, response.result.structuredContent.mcpVersion === '3.26.1');
   assert.equal(response.result.structuredContent.mcpInstallMode, 'repo_checkout');
   assert.match(response.result.structuredContent.mcpExecutablePath, /(?:services\/mcp-server\/)?server\.js$/);
   assert.equal(response.result.structuredContent.apiBaseUrl, 'https://time-api.findtime.io');
@@ -235,25 +276,223 @@ test('get_api_diagnostics returns manual verification hints when the latest MCP 
 });
 
 test('search_timezones calls the production search endpoint with normalized params', async () => {
+  const previousClientId = process.env.FINDTIME_MCP_CLIENT_ID;
+  process.env.FINDTIME_MCP_CLIENT_ID = 'test-client-id';
+  const calls = [];
+  try {
+    const server = createFindtimeMcpServer({
+      apiBaseUrl: 'https://time-api.findtime.io',
+      apiKey: 'test-key',
+      fetchImpl: async (url, init) => {
+        calls.push({ url, init });
+        return {
+          ok: true,
+          status: 200,
+          async text() {
+            return JSON.stringify({
+              shape: 'locations_search.v2',
+              results: [
+                {
+                  id: 'findtime:victoria|CA|America/Vancouver',
+                  name: 'Victoria'
+                }
+              ]
+            });
+          }
+        };
+      }
+    });
+
+    const response = await server.handleMessage({
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'tools/call',
+      params: {
+        name: 'search_timezones',
+        arguments: {
+          query: 'Victoria',
+          countryCode: 'CA',
+          limit: 3
+        }
+      }
+    });
+
+    assert.equal(calls.length, 1);
+    assert.equal(
+      calls[0].url,
+      'https://time-api.findtime.io/locations/search?query=Victoria&countryCode=CA&limit=3'
+    );
+    assert.equal(calls[0].init.headers.Authorization, 'Bearer test-key');
+    assert.equal(calls[0].init.headers['X-Findtime-User-ID'], 'test-client-id');
+    assert.equal(response.result.isError, undefined);
+    assert.equal(response.result.structuredContent.shape, 'locations_search.v2');
+    assert.equal(response.result.structuredContent._meta.countryCodeBehavior, 'ranking_hint');
+    assert.equal(response.result.structuredContent._meta.countryHint, 'CA');
+  } finally {
+    if (previousClientId === undefined) {
+      delete process.env.FINDTIME_MCP_CLIENT_ID;
+    } else {
+      process.env.FINDTIME_MCP_CLIENT_ID = previousClientId;
+    }
+  }
+});
+
+test('per-call end-user attribution forwards valid _endUserId as HTTP header', async () => {
   const calls = [];
   const server = createFindtimeMcpServer({
     apiBaseUrl: 'https://time-api.findtime.io',
-    apiKey: 'test-key',
+    fetchImpl: makeCapturingFetch(calls)
+  });
+
+  const response = await callCurrentTime(server, {
+    query: 'Tokyo',
+    _endUserId: 'a3f2c1d4e5b6c7d8'
+  });
+
+  assert.equal(response.result.isError, undefined);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].init.headers['X-Findtime-End-User-ID'], 'a3f2c1d4e5b6c7d8');
+  assert.doesNotMatch(calls[0].url, /_endUserId/);
+});
+
+test('per-call end-user attribution omits HTTP header when _endUserId is absent', async () => {
+  const calls = [];
+  const server = createFindtimeMcpServer({
+    apiBaseUrl: 'https://time-api.findtime.io',
+    fetchImpl: makeCapturingFetch(calls)
+  });
+
+  await callCurrentTime(server, { query: 'Tokyo' });
+
+  assert.equal(calls.length, 1);
+  assert.equal(Object.hasOwn(calls[0].init.headers, 'X-Findtime-End-User-ID'), false);
+});
+
+test('per-call end-user attribution treats empty _endUserId as absent', async () => {
+  const calls = [];
+  const server = createFindtimeMcpServer({
+    apiBaseUrl: 'https://time-api.findtime.io',
+    fetchImpl: makeCapturingFetch(calls)
+  });
+
+  await callCurrentTime(server, { query: 'Tokyo', _endUserId: '' });
+
+  assert.equal(calls.length, 1);
+  assert.equal(Object.hasOwn(calls[0].init.headers, 'X-Findtime-End-User-ID'), false);
+});
+
+test('per-call end-user attribution treats null _endUserId as absent', async () => {
+  const calls = [];
+  const server = createFindtimeMcpServer({
+    apiBaseUrl: 'https://time-api.findtime.io',
+    fetchImpl: makeCapturingFetch(calls)
+  });
+
+  await callCurrentTime(server, { query: 'Tokyo', _endUserId: null });
+
+  assert.equal(calls.length, 1);
+  assert.equal(Object.hasOwn(calls[0].init.headers, 'X-Findtime-End-User-ID'), false);
+});
+
+test('per-call end-user attribution rejects non-string _endUserId values with invalid params', async () => {
+  for (const badValue of [123, { id: 'abc' }, ['abc']]) {
+    const calls = [];
+    const server = createFindtimeMcpServer({
+      apiBaseUrl: 'https://time-api.findtime.io',
+      fetchImpl: makeCapturingFetch(calls)
+    });
+
+    const response = await callCurrentTime(server, { query: 'Tokyo', _endUserId: badValue });
+
+    assert.equal(response.error.code, -32602);
+    assert.match(response.error.message, /_endUserId must be a string/);
+    assert.equal(calls.length, 0);
+  }
+});
+
+test('per-call end-user attribution rejects CR and LF control characters', async () => {
+  for (const badValue of ['abc\n123', 'abc\r123']) {
+    const calls = [];
+    const server = createFindtimeMcpServer({
+      apiBaseUrl: 'https://time-api.findtime.io',
+      fetchImpl: makeCapturingFetch(calls)
+    });
+
+    const response = await callCurrentTime(server, { query: 'Tokyo', _endUserId: badValue });
+
+    assert.equal(response.error.code, -32602);
+    assert.match(response.error.message, /control characters/);
+    assert.equal(calls.length, 0);
+  }
+});
+
+test('per-call end-user attribution does not leak between consecutive tool calls', async () => {
+  const calls = [];
+  const server = createFindtimeMcpServer({
+    apiBaseUrl: 'https://time-api.findtime.io',
+    fetchImpl: makeCapturingFetch(calls)
+  });
+
+  await callCurrentTime(server, { query: 'Tokyo', _endUserId: 'user-a-hash' });
+  await callCurrentTime(server, { query: 'London', _endUserId: 'user-b-hash' });
+
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].init.headers['X-Findtime-End-User-ID'], 'user-a-hash');
+  assert.equal(calls[1].init.headers['X-Findtime-End-User-ID'], 'user-b-hash');
+});
+
+test('per-call end-user attribution rejects _endUserId longer than 256 characters', async () => {
+  const calls = [];
+  const server = createFindtimeMcpServer({
+    apiBaseUrl: 'https://time-api.findtime.io',
+    fetchImpl: makeCapturingFetch(calls)
+  });
+
+  const response = await callCurrentTime(server, { query: 'Tokyo', _endUserId: 'a'.repeat(257) });
+
+  assert.equal(response.error.code, -32602);
+  assert.match(response.error.message, /256 characters or fewer/);
+  assert.equal(calls.length, 0);
+});
+
+test('per-call end-user attribution never logs raw _endUserId values', async () => {
+  const rawEndUserId = 'raw-secret-attribution-token';
+  const calls = [];
+  const logs = [];
+  const originalLog = console.log;
+  const originalError = console.error;
+  console.log = (...args) => logs.push(args.join(' '));
+  console.error = (...args) => logs.push(args.join(' '));
+
+  try {
+    const server = createFindtimeMcpServer({
+      apiBaseUrl: 'https://time-api.findtime.io',
+      fetchImpl: makeCapturingFetch(calls)
+    });
+
+    await callCurrentTime(server, { query: 'Tokyo', _endUserId: rawEndUserId });
+  } finally {
+    console.log = originalLog;
+    console.error = originalError;
+  }
+
+  assert.doesNotMatch(logs.join('\n'), new RegExp(rawEndUserId));
+});
+
+test('get_api_diagnostics never reports raw per-call attribution values', async () => {
+  const rawEndUserId = 'diagnostic-user-secret';
+  const calls = [];
+  const server = createFindtimeMcpServer({
+    apiBaseUrl: 'https://time-api.findtime.io',
     fetchImpl: async (url, init) => {
       calls.push({ url, init });
       return {
         ok: true,
         status: 200,
         async text() {
-          return JSON.stringify({
-            shape: 'locations_search.v2',
-            results: [
-              {
-                id: 'findtime:victoria|CA|America/Vancouver',
-                name: 'Victoria'
-              }
-            ]
-          });
+          return url.includes('registry.npmjs.org')
+            ? JSON.stringify({ version: '3.26.1' })
+            : JSON.stringify({ ok: true, service: 'time-api' });
         }
       };
     }
@@ -261,28 +500,18 @@ test('search_timezones calls the production search endpoint with normalized para
 
   const response = await server.handleMessage({
     jsonrpc: '2.0',
-    id: 3,
+    id: 1010,
     method: 'tools/call',
     params: {
-      name: 'search_timezones',
+      name: 'get_api_diagnostics',
       arguments: {
-        query: 'Victoria',
-        countryCode: 'CA',
-        limit: 3
+        _endUserId: rawEndUserId
       }
     }
   });
 
-  assert.equal(calls.length, 1);
-  assert.equal(
-    calls[0].url,
-    'https://time-api.findtime.io/locations/search?query=Victoria&countryCode=CA&limit=3'
-  );
-  assert.equal(calls[0].init.headers.Authorization, 'Bearer test-key');
-  assert.equal(response.result.isError, undefined);
-  assert.equal(response.result.structuredContent.shape, 'locations_search.v2');
-  assert.equal(response.result.structuredContent._meta.countryCodeBehavior, 'ranking_hint');
-  assert.equal(response.result.structuredContent._meta.countryHint, 'CA');
+  assert.equal(calls[0].init.headers['X-Findtime-End-User-ID'], rawEndUserId);
+  assert.doesNotMatch(JSON.stringify(response), new RegExp(rawEndUserId));
 });
 
 test('search_timezones exposes primaryMatch and countryFilteredResults when a country hint is supplied', async () => {
@@ -578,6 +807,38 @@ test('stdio server mirrors content-length framing when initialize arrives with c
 
   assert.match(response, /^Content-Length:\s+\d+\r\n\r\n\{/);
 });
+
+function makeCapturingFetch(calls, payload = {}) {
+  return async (url, init) => {
+    calls.push({ url, init });
+    return {
+      ok: true,
+      status: 200,
+      async text() {
+        return JSON.stringify({
+          shape: 'current_time.v2',
+          resolved: true,
+          timezone: {
+            iana: 'Asia/Tokyo'
+          },
+          ...payload
+        });
+      }
+    };
+  };
+}
+
+function callCurrentTime(server, args) {
+  return server.handleMessage({
+    jsonrpc: '2.0',
+    id: 1002,
+    method: 'tools/call',
+    params: {
+      name: 'get_current_time',
+      arguments: args
+    }
+  });
+}
 
 function invokeServerOverStdio({ serverPath, input, env }) {
   return new Promise((resolve, reject) => {

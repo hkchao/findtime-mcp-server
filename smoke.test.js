@@ -100,6 +100,27 @@ test('convert_time smoke: New York to London and Tokyo returns target conversion
   );
 });
 
+test('convert_time smoke preserves weekday labels across same-day and next-day targets', LIVE_TEST_OPTIONS, async () => {
+  const payload = await callTool('convert_time', {
+    from: 'New York',
+    to: ['London', 'Tokyo'],
+    toCountryCodes: ['GB', 'JP'],
+    time: '3:00 PM',
+    date: '2026-05-26'
+  });
+
+  assert.equal(payload.shape, 'convert_time.v2');
+  assert.equal(payload.from.localTime.weekday, 'Tuesday');
+  assert.deepEqual(
+    payload.targets.map((target) => target.localTime.weekday),
+    ['Tuesday', 'Wednesday']
+  );
+  assert.deepEqual(
+    payload.targets.map((target) => target.dayDeltaLabel),
+    ['same day', '+1 day']
+  );
+});
+
 test('get_overlap_hours smoke: New York and London returns overlap window', LIVE_TEST_OPTIONS, async () => {
   const payload = await callTool('get_overlap_hours', {
     locations: ['New York', 'London'],

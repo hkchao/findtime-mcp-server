@@ -1,6 +1,6 @@
 {
   "name": "@findtime/mcp-server",
-  "version": "3.25.15",
+  "version": "3.26.1",
   "mcpName": "io.github.hkchao/findtime-mcp-server",
   "description": "Production-parity MCP server for the findtime.io Time API",
   "bin": {
@@ -10,6 +10,7 @@
   "type": "commonjs",
   "files": [
     "server.js",
+    "help-catalog.cjs",
     "README.md",
     "SKILL.md",
     "examples"

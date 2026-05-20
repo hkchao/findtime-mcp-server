@@ -9,6 +9,13 @@ const LOCAL_PACKAGE_PATH = path.join(PACKAGE_ROOT, 'package.json');
 const REPO_ROOT = path.resolve(PACKAGE_ROOT, '..', '..');
 const REPO_PACKAGE_PATH = path.join(REPO_ROOT, 'package.json');
 const DEFAULT_PROTOCOL_VERSION = '2024-11-05';
+const END_USER_ID_ARGUMENT = '_endUserId';
+const END_USER_ID_HEADER = 'X-Findtime-End-User-ID';
+const END_USER_ID_MAX_LENGTH = 256;
+const END_USER_ID_SCHEMA = {
+  type: 'string',
+  description: 'Optional opaque per-call end-user attribution token populated by the MCP host, not the LLM. Use a non-PII hash or token; never send raw email, name, or platform user ID.'
+};
 const SUPPORTED_PROTOCOL_VERSIONS = new Set([
   '2024-11-05',
   '2025-03-26',
@@ -48,6 +55,18 @@ const DEFAULT_API_KEY = firstNonEmpty(
   process.env.FINDTIME_MCP_API_KEY,
   process.env.FINDTIME_TIME_API_KEY
 );
+const DEFAULT_BINDING_TYPE = firstNonEmpty(
+  process.env.FINDTIME_BINDING_TYPE,
+  process.env.FINDTIME_MCP_BINDING_TYPE
+) || '';
+const DEFAULT_BINDING_VALUE = firstNonEmpty(
+  process.env.FINDTIME_BINDING_VALUE,
+  process.env.FINDTIME_MCP_BINDING_VALUE
+) || '';
+const DEFAULT_BINDING_HEADER = firstNonEmpty(
+  process.env.FINDTIME_BINDING_HEADER,
+  process.env.FINDTIME_MCP_BINDING_HEADER
+) || '';
 const TIMEZONE_HELPERS_PATH = path.join(REPO_ROOT, 'slack-bot', 'timezone-helpers.js');
 const ANSWER_ONLY_TOOL_NAMES = new Set(['answer_time_question', 'get_findtime_help', 'get_api_diagnostics']);
 
@@ -237,7 +256,7 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: 'convert_time',
-    description: 'Convert a source local time into one or more target locations using the production conversion endpoint.',
+    description: 'Convert a source local time into one or more target locations using the production conversion endpoint. When presenting results, copy localTime.weekday, localTime.date, localTime.time12h/time24h, timezone abbreviation, and UTC offset exactly from the tool output; do not recompute or shift day names during synthesis.',
     inputSchema: {
       type: 'object',
       required: ['from', 'to', 'time'],
@@ -395,6 +414,9 @@ const TOOL_DEFINITIONS = [
 ];
 
 const TOOL_DEFINITIONS_BY_NAME = new Map(TOOL_DEFINITIONS.map((tool) => [tool.name, tool]));
+for (const tool of TOOL_DEFINITIONS) {
+  addEndUserIdSchemaProperty(tool);
+}
 let cachedResolveLocation;
 let cachedMcpClientId;
 
@@ -417,13 +439,47 @@ function getVisibleToolDefinitions() {
   return TOOL_DEFINITIONS.filter((tool) => ANSWER_ONLY_TOOL_NAMES.has(tool.name));
 }
 
-function buildFindtimeHelpPayload() {
+function loadHelpCatalog() {
+  const candidatePaths = [
+    path.join(PACKAGE_ROOT, 'help-catalog.cjs'),
+    path.join(REPO_ROOT, 'src', 'shared', 'findtimeHelpCatalog.cjs')
+  ];
+  for (const catalogPath of candidatePaths) {
+    try {
+      return require(catalogPath);
+    } catch (_error) {
+      // Try the next candidate. Published MCP packages use PACKAGE_ROOT.
+    }
+  }
   return {
+    buildHelpPayload: () => ({
+      version: 'answer-help.v1',
+      surface: 'mcp',
+      title: 'findtime.io Time Help',
+      summary: 'Use findtime.io MCP for accurate timezone, DST, conversion, overlap-hours, and cross-timezone meeting-time intelligence.',
+      suggestions: [
+        'What time is it now in Tokyo?',
+        'What timezone is Auckland in?',
+        'If it is 3:30pm in London, what time is it in Sydney?',
+        'What working hours overlap for San Francisco, Berlin, and Tokyo?',
+        'Find a good meeting time for San Francisco, Berlin, and Sydney.'
+      ],
+      intents: [],
+      ambiguityExamples: [],
+      failurePolicy: []
+    })
+  };
+}
+
+function buildFindtimeHelpPayload() {
+  const help = loadHelpCatalog().buildHelpPayload({ surface: 'mcp', includeAllIntents: true });
+  return {
+    ...help,
     ok: true,
     tool: 'get_findtime_help',
     recommendedTool: 'answer_time_question',
     recommendedMode: 'FINDTIME_MCP_TOOL_MODE=answer-only',
-    summary: 'Use findtime.io MCP for accurate timezone, DST, conversion, overlap-hours, and cross-timezone meeting-time intelligence. In enterprise bots, route natural-language questions through answer_time_question.',
+    summary: `${help.summary} In enterprise bots, route natural-language questions through answer_time_question.`,
     install: {
       command: 'npx',
       args: ['-y', '@findtime/mcp-server'],
@@ -434,62 +490,6 @@ function buildFindtimeHelpPayload() {
         FINDTIME_MCP_TOOL_MODE: 'answer-only'
       }
     },
-    intents: [
-      {
-        intent: 'current_time',
-        example: 'What time is it now in Tokyo?',
-        notes: 'Returns local date/time, timezone, UTC offset, and DST context when relevant.'
-      },
-      {
-        intent: 'timezone_lookup',
-        example: 'What is the IANA timezone for San Francisco?',
-        notes: 'Use IANA timezone IDs as canonical identifiers.'
-      },
-      {
-        intent: 'time_conversion',
-        example: 'Convert 3pm next Tuesday in New York to London, Berlin, and Singapore.',
-        notes: 'Include local dates because conversions often cross calendar days.'
-      },
-      {
-        intent: 'dst_status',
-        example: 'Is Mexico City on DST?',
-        notes: 'Returns DST status and transition context when available.'
-      },
-      {
-        intent: 'overlap_hours',
-        example: 'What working hours overlap for San Francisco, Berlin, and Tokyo?',
-        notes: 'Useful for distributed-team availability and handoff planning.'
-      },
-      {
-        intent: 'meeting_time_search',
-        example: 'Find a good 45-minute meeting time next week for San Francisco, Berlin, and Sydney.',
-        notes: 'Returns ranked meeting windows and tradeoffs across participants.'
-      },
-      {
-        intent: 'abbreviation_disambiguation',
-        example: 'What does CST mean for a customer in China versus a customer in Chicago?',
-        notes: 'Timezone abbreviations are aliases, not canonical identifiers.'
-      },
-      {
-        intent: 'location_disambiguation',
-        example: 'What time is it in Victoria?',
-        notes: 'Ambiguous place names should return clarification or country-aware choices instead of silent guessing.'
-      }
-    ],
-    ambiguityExamples: [
-      {
-        query: 'What time is it in Springfield?',
-        expectedBehavior: 'Ask for clarification or provide likely matches because many cities share this name.'
-      },
-      {
-        query: 'Convert 9am CST to London.',
-        expectedBehavior: 'Clarify whether CST means China Standard Time, Central Standard Time, Cuba Standard Time, or another regional meaning when context is insufficient.'
-      },
-      {
-        query: 'Schedule a meeting for Paris and Sydney next Friday.',
-        expectedBehavior: 'Resolve Paris, France unless context suggests otherwise; include date and local-time tradeoffs.'
-      }
-    ],
     answerApiPattern: {
       tool: 'answer_time_question',
       arguments: {
@@ -497,13 +497,22 @@ function buildFindtimeHelpPayload() {
         userTimezone: 'America/Los_Angeles',
         locale: 'en-US'
       }
-    },
-    failurePolicy: [
-      'If a findtime.io MCP call fails, say the MCP call failed and include the visible error.',
-      'Do not present fallback timezone or DST calculations as if they came from findtime.io MCP.',
-      'For high-stakes scheduling, retry or ask the user before using fallback reasoning.'
-    ]
+    }
   };
+}
+
+function formatFindtimeHelpText(help) {
+  const lines = [
+    'findtime.io Time Help',
+    '',
+    'Try asking:',
+    ...help.intents.map((entry) => `- ${entry.example}`),
+    '',
+    'If a place or timezone is ambiguous, findtime.io will ask for clarification. For example:',
+    ...help.ambiguityExamples.map((entry) => `- ${entry.query} -> ${entry.expectedBehavior}`),
+  ];
+
+  return lines.join('\n');
 }
 
 function safeReadJson(filePath) {
@@ -749,6 +758,56 @@ function invalidParamsError(message) {
   const error = new Error(message);
   error.code = -32602;
   return error;
+}
+
+function addEndUserIdSchemaProperty(tool) {
+  if (!tool || !tool.inputSchema || tool.inputSchema.type !== 'object') return;
+  tool.inputSchema.properties = {
+    ...(tool.inputSchema.properties || {}),
+    [END_USER_ID_ARGUMENT]: END_USER_ID_SCHEMA
+  };
+}
+
+function extractEndUserId(args = {}) {
+  const cleanArgs = args && typeof args === 'object' && !Array.isArray(args)
+    ? { ...args }
+    : {};
+
+  if (!Object.prototype.hasOwnProperty.call(cleanArgs, END_USER_ID_ARGUMENT)) {
+    return { args: cleanArgs, endUserId: null };
+  }
+
+  const value = cleanArgs[END_USER_ID_ARGUMENT];
+  delete cleanArgs[END_USER_ID_ARGUMENT];
+
+  if (value === null || value === undefined || value === '') {
+    return { args: cleanArgs, endUserId: null };
+  }
+
+  if (typeof value !== 'string') {
+    throw invalidParamsError(`${END_USER_ID_ARGUMENT} must be a string when provided.`);
+  }
+
+  if (value.length > END_USER_ID_MAX_LENGTH) {
+    throw invalidParamsError(`${END_USER_ID_ARGUMENT} must be ${END_USER_ID_MAX_LENGTH} characters or fewer.`);
+  }
+
+  if (/[\u0000-\u001F\u007F]/.test(value)) {
+    throw invalidParamsError(`${END_USER_ID_ARGUMENT} must not contain control characters.`);
+  }
+
+  if (!value.trim()) {
+    return { args: cleanArgs, endUserId: null };
+  }
+
+  return { args: cleanArgs, endUserId: value };
+}
+
+function scrubToolArgs(args = {}) {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return {};
+  const cleanArgs = { ...args };
+  delete cleanArgs[END_USER_ID_ARGUMENT];
+  return cleanArgs;
 }
 
 function methodNotFoundError(method) {
@@ -1061,6 +1120,9 @@ function createFindtimeMcpServer(options = {}) {
   const apiBaseUrl = options.apiBaseUrl || DEFAULT_API_BASE_URL;
   const timeoutMs = Number.isFinite(options.timeoutMs) ? options.timeoutMs : DEFAULT_TIMEOUT_MS;
   const apiKey = options.apiKey === undefined ? DEFAULT_API_KEY : options.apiKey;
+  const bindingType = options.bindingType === undefined ? DEFAULT_BINDING_TYPE : options.bindingType;
+  const bindingValue = options.bindingValue === undefined ? DEFAULT_BINDING_VALUE : options.bindingValue;
+  const bindingHeader = options.bindingHeader === undefined ? DEFAULT_BINDING_HEADER : options.bindingHeader;
   const serverName = options.serverName || 'findtime';
   const serverTitle = options.serverTitle || 'findtime Time API MCP';
   const resolveLocationImpl = options.resolveLocationImpl === undefined
@@ -1076,7 +1138,7 @@ function createFindtimeMcpServer(options = {}) {
     protocolVersion: DEFAULT_PROTOCOL_VERSION
   };
 
-  async function fetchJson(toolName, request) {
+  async function fetchJson(toolName, request, metadata = {}) {
     const url = new URL(request.path, apiBaseUrl);
     if (request.params && request.params.size > 0) {
       url.search = request.params.toString();
@@ -1090,6 +1152,22 @@ function createFindtimeMcpServer(options = {}) {
 
     if (typeof apiKey === 'string' && apiKey.trim()) {
       headers.Authorization = `Bearer ${apiKey.trim()}`;
+    }
+
+    const clientUserId = getMcpClientId();
+    if (typeof clientUserId === 'string' && clientUserId.trim()) {
+      headers['X-Findtime-User-ID'] = clientUserId.trim();
+    }
+
+    const resolvedBindingHeader = typeof bindingHeader === 'string' && bindingHeader.trim()
+      ? bindingHeader.trim()
+      : normalizeBindingHeader(bindingType);
+    if (resolvedBindingHeader && typeof bindingValue === 'string' && bindingValue.trim()) {
+      headers[resolvedBindingHeader] = bindingValue.trim();
+    }
+
+    if (typeof metadata.endUserId === 'string' && metadata.endUserId) {
+      headers[END_USER_ID_HEADER] = metadata.endUserId;
     }
 
     const controller = new AbortController();
@@ -1198,22 +1276,30 @@ function createFindtimeMcpServer(options = {}) {
       throw invalidParamsError(`Unknown tool: ${name}`);
     }
 
+    const extracted = extractEndUserId(args || {});
+    const toolArgs = extracted.args;
+    const requestMetadata = {
+      endUserId: extracted.endUserId,
+      endUserIdPresent: Boolean(extracted.endUserId)
+    };
+
     if (name === 'get_findtime_help') {
+      const help = buildFindtimeHelpPayload();
       return {
         content: [
           {
             type: 'text',
-            text: `get_findtime_help response\n${JSON.stringify(buildFindtimeHelpPayload(), null, 2)}`
+            text: formatFindtimeHelpText(help)
           }
         ],
-        structuredContent: buildFindtimeHelpPayload()
+        structuredContent: help
       };
     }
 
     if (name === 'get_api_diagnostics') {
-      const request = tool.buildRequest(args || {});
+      const request = tool.buildRequest(toolArgs);
       const [apiResponse, latestMcpVersionCheck] = await Promise.all([
-        fetchJson(name, request),
+        fetchJson(name, request, requestMetadata),
         fetchLatestMcpVersion()
       ]);
       const checkedAt = new Date().toISOString();
@@ -1265,12 +1351,12 @@ function createFindtimeMcpServer(options = {}) {
       });
     }
 
-    const request = tool.buildRequest(args || {});
-    let apiResponse = await fetchJson(name, request);
+    const request = tool.buildRequest(toolArgs);
+    let apiResponse = await fetchJson(name, request, requestMetadata);
 
     if (!apiResponse.ok) {
       if (name === 'get_current_time' && apiResponse.status === 404) {
-        const rawCountryQuery = firstNonEmpty(args.query, args.city);
+        const rawCountryQuery = firstNonEmpty(toolArgs.query, toolArgs.city);
         const resolvedCountry = resolveCountryStyleInput(rawCountryQuery, resolveLocationImpl);
 
         if (resolvedCountry && resolvedCountry.city) {
@@ -1278,7 +1364,7 @@ function createFindtimeMcpServer(options = {}) {
             city: resolvedCountry.city,
             countryCode: resolvedCountry.countryCode || undefined
           });
-          const retryResponse = await fetchJson(name, retryRequest);
+          const retryResponse = await fetchJson(name, retryRequest, requestMetadata);
 
           if (retryResponse.ok) {
             return buildToolSuccessResult(name, retryResponse.parsedBody, {
@@ -1311,7 +1397,7 @@ function createFindtimeMcpServer(options = {}) {
     let meta = null;
 
     if (name === 'search_timezones') {
-      const enriched = enrichLocationSearchPayload(payload, args);
+      const enriched = enrichLocationSearchPayload(payload, toolArgs);
       payload = enriched.payload;
       meta = enriched.meta;
     }
@@ -1380,7 +1466,7 @@ function createFindtimeMcpServer(options = {}) {
           const result = await callTool(toolName, toolArgs);
           recordMcpUsageTelemetry({
             toolName,
-            args: toolArgs,
+            args: scrubToolArgs(toolArgs),
             result,
             latencyMs: Date.now() - startedAt
           });
@@ -1388,7 +1474,7 @@ function createFindtimeMcpServer(options = {}) {
         } catch (toolError) {
           recordMcpUsageTelemetry({
             toolName,
-            args: toolArgs,
+            args: scrubToolArgs(toolArgs),
             error: toolError,
             latencyMs: Date.now() - startedAt
           });
@@ -1413,6 +1499,14 @@ function createFindtimeMcpServer(options = {}) {
     callTool,
     handleMessage
   };
+}
+
+function normalizeBindingHeader(bindingType) {
+  const normalized = String(bindingType || '').trim().toLowerCase();
+  if (normalized === 'slack_team') return 'X-Slack-Team-ID';
+  if (normalized === 'workspace_id') return 'X-Findtime-Workspace-ID';
+  if (normalized === 'install_id') return 'X-Findtime-Install-ID';
+  return '';
 }
 
 function tryParseJson(value) {
