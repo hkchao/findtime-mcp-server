@@ -73,7 +73,7 @@ const ANSWER_ONLY_TOOL_NAMES = new Set(['answer_time_question', 'get_findtime_he
 const TOOL_DEFINITIONS = [
   {
     name: 'answer_time_question',
-    description: 'Answer a natural-language time, timezone, conversion, DST, overlap, scheduling, abbreviation, or IANA timezone question. Prefer this for messy user prompts; findtime.io will classify intent and call the right deterministic time API behavior.',
+    description: 'PREFERRED entry point for time/timezone/scheduling questions. findtime.io classifies intent and dispatches internally. Use this WHENEVER the user\'s input includes a natural-language day or date qualifier, such as "Tuesday", "next Friday", "tomorrow", "tonight", "this weekend", "in 3 weeks", or "last Monday". The specific tools (convert_time, get_current_time, find_meeting_time, etc.) will silently drop these qualifiers if you dispatch to them without an explicit ISO date. Also the right choice for vague or mixed-intent prompts.',
     inputSchema: {
       type: 'object',
       required: ['query'],
@@ -176,7 +176,7 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: 'get_current_time',
-    description: 'Return the production current time payload for a single city, query, or timezone. Exact country-name queries may be retried through a canonical city when the resolver can do so deterministically.',
+    description: 'Return the production current time payload for a single city, query, or timezone. Exact country-name queries may be retried through a canonical city when the resolver can do so deterministically. For relative-date inputs ("Tuesday", "next Friday", "tomorrow", "tonight"), route to answer_time_question, which resolves the relative date and dispatches internally.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -211,7 +211,7 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: 'get_dst_schedule',
-    description: 'Return the production DST schedule payload, including current abbreviation and transition details.',
+    description: 'Return the production DST schedule payload, including current abbreviation and transition details. For relative-date inputs ("this week", "next Friday", "tomorrow"), route to answer_time_question, which resolves the relative date and dispatches internally.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -256,7 +256,7 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: 'convert_time',
-    description: 'Convert a source local time into one or more target locations using the production conversion endpoint. When presenting results, copy localTime.weekday, localTime.date, localTime.time12h/time24h, timezone abbreviation, and UTC offset exactly from the tool output; do not recompute or shift day names during synthesis.',
+    description: 'Convert a source local time into one or more target locations using the production conversion endpoint. Use ONLY when date is an explicit ISO calendar date (YYYY-MM-DD) you can pass in, OR the conversion is for the current moment with no date qualifier at all. DO NOT use this tool if the user said "Tuesday", "tomorrow", "next Friday", or any other relative day/date phrase; those qualifiers will be silently dropped here. Route to answer_time_question instead, which parses relative dates correctly. When presenting results, copy localTime.weekday, localTime.date, localTime.time12h/time24h, timezone abbreviation, and UTC offset exactly from the tool output; do not recompute or shift day names during synthesis.',
     inputSchema: {
       type: 'object',
       required: ['from', 'to', 'time'],
@@ -300,7 +300,7 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: 'get_overlap_hours',
-    description: 'Return shared business-hours overlap across multiple locations using the production overlap endpoint.',
+    description: 'Return shared business-hours overlap across multiple locations using the production overlap endpoint. For relative-date inputs ("this week", "next Friday", "tomorrow"), route to answer_time_question, which resolves the relative date and dispatches internally.',
     inputSchema: {
       type: 'object',
       required: ['locations'],
@@ -329,7 +329,7 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: 'find_meeting_time',
-    description: 'Return ranked meeting suggestions from the production meeting search endpoint.',
+    description: 'Return ranked meeting suggestions from the production meeting search endpoint. For relative-date inputs ("this week", "next Friday", "tomorrow"), route to answer_time_question, which resolves the relative date and dispatches internally.',
     inputSchema: {
       type: 'object',
       required: ['locations'],

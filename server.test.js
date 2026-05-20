@@ -61,6 +61,23 @@ test('convert_time tool description tells models to preserve returned date field
   assert.match(convertTool.description, /do not recompute or shift day names/);
 });
 
+test('tool descriptions route relative date phrases through answer_time_question', async () => {
+  const toolsByName = new Map(TOOL_DEFINITIONS.map((tool) => [tool.name, tool]));
+
+  assert.match(toolsByName.get('answer_time_question').description, /PREFERRED entry point/);
+  assert.match(toolsByName.get('answer_time_question').description, /next Friday/);
+  assert.match(toolsByName.get('answer_time_question').description, /silently drop these qualifiers/);
+
+  assert.match(toolsByName.get('convert_time').description, /Use ONLY when date is an explicit ISO calendar date/);
+  assert.match(toolsByName.get('convert_time').description, /DO NOT use this tool if the user said "Tuesday"/);
+  assert.match(toolsByName.get('convert_time').description, /Route to answer_time_question instead/);
+
+  for (const toolName of ['get_current_time', 'get_dst_schedule', 'get_overlap_hours', 'find_meeting_time']) {
+    assert.match(toolsByName.get(toolName).description, /For relative-date inputs/);
+    assert.match(toolsByName.get(toolName).description, /route to answer_time_question/);
+  }
+});
+
 test('answer-only tool mode exposes only the router and diagnostics tools', async () => {
   const previousToolMode = process.env.FINDTIME_MCP_TOOL_MODE;
   process.env.FINDTIME_MCP_TOOL_MODE = 'answer-only';
