@@ -59,10 +59,13 @@ Release source of truth:
 Pre-publish checks:
 
 ```bash
-cd services/mcp-server
+cd services/mcp-server  # or the standalone findtime-mcp-server package repo
+/usr/local/bin/npm run release:check
 /usr/local/bin/npm test
 /usr/local/bin/npm pack --dry-run
 ```
+
+The release check is mandatory before publish. `prepublishOnly` will reject raw publishes unless the publisher sets the version-specific acknowledgement printed by `release:check`, for example `FINDTIME_MCP_RELEASE_CHECKED=3.27.0`. Set that variable only after reading this playbook and completing the pre-publish checks; it is deliberately version-specific so it cannot silently carry across future releases.
 
 If `npm` is not on `PATH`, try `/usr/local/bin/npm`. Do not stop at `npm: command not found` until checking the absolute path.
 
@@ -95,13 +98,29 @@ rm /private/tmp/findtime-mcp-npmrc
 After publishing, verify the live package:
 
 ```bash
-/usr/local/bin/npm view @findtime/mcp-server version --cache /private/tmp/findtime-npm-cache
+/usr/local/bin/npm view @findtime/mcp-server@<version> version \
+  --prefer-online \
+  --cache /private/tmp/findtime-npm-cache-verify
+/usr/local/bin/npm dist-tag ls @findtime/mcp-server \
+  --cache /private/tmp/findtime-npm-cache-verify
+/usr/local/bin/npm view @findtime/mcp-server version \
+  --prefer-online \
+  --cache /private/tmp/findtime-npm-cache-verify
 ```
+
+Do not trust a single `npm view @findtime/mcp-server version` result immediately after publish if it returns the old version. npm can show a stale cached `latest` lookup even after `npm publish` reports success. Confirm all three facts before calling the release done:
+
+- `npm view @findtime/mcp-server@<version> version` returns the newly published version.
+- `npm dist-tag ls @findtime/mcp-server` shows `latest: <version>`.
+- a fresh-cache, `--prefer-online` `npm view @findtime/mcp-server version` returns the same version.
+
+If the direct version exists and `latest` is correct but a plain `npm view` still shows the old version, treat it as cache/propagation lag and retry with a new temp cache. If `latest` is wrong, fix the dist-tag explicitly before reporting success.
 
 Expected release completion report:
 
 - commit SHA and pushed branch
 - npm version published
+- `latest` dist-tag value
 - test status from `prepublishOnly`
 - tarball contents sanity check
 - deploy impact: publishing the MCP package does not redeploy `time-api.findtime.io`; Time API only needs a separate deploy if upstream request handling or attribution ingestion changed

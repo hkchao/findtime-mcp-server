@@ -26,8 +26,9 @@
     "test": "node --test ./server.test.js",
     "test:smoke": "node --test ./smoke.test.js",
     "pack": "npm pack --dry-run",
+    "release:check": "node ./scripts/release-check.cjs",
     "publish:dry-run": "npm publish --dry-run --access public",
-    "prepublishOnly": "node --test ./server.test.js"
+    "prepublishOnly": "node ./scripts/release-check.cjs --prepublish && node --test ./server.test.js"
   },
   "publishConfig": {
     "access": "public"
