@@ -282,3 +282,28 @@ new time; idempotent describes the absence of additional domain mutations.
 
 API-key environment variables are alternative configuration names for one key,
 not four separate credentials. The package remains `UNLICENSED`.
+
+## Privacy, authentication, and service limits
+
+Privacy policy: https://findtime.io/privacy/
+
+The stdio process runs locally. Time tools send their query arguments to the
+configured Time API (by default `https://time-api.findtime.io`). The selected API
+key is sent in the `Authorization: Bearer` header to that API, not to npm or
+telemetry. Configure only API hosts you trust. The four API-key variable names
+are aliases: the first nonempty value wins in this order: `FINDTIME_API_KEY`,
+`TIME_API_KEY`, `FINDTIME_MCP_API_KEY`, `FINDTIME_TIME_API_KEY`.
+
+The hosted Time API owns API-key validation, configured per-key rate limits,
+and quotas. The wrapper forwards upstream failures, including HTTP 429, as MCP
+tool errors. It does not expose a public HTTP listener or implement a separate
+local rate limiter. Help is local; diagnostics also reads npm version metadata.
+
+Optional usage telemetry goes to `https://slack.findtime.io/telemetry/usage` by
+default. The wrapper sends tool name, outcome, query-text length, a persistent
+installation/client identifier, version, OS, locale, timezone, and latency.
+This telemetry event does not include raw query text, API keys, or the per-call
+`_endUserId`. Set `FINDTIME_MCP_INSTRUMENTATION_ENABLED=false` to disable it.
+A generated installation identifier is stored in the user's state directory.
+Host-provided attribution identifiers are sent to the Time API as documented
+above; use opaque non-PII values.

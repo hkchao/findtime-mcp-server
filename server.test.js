@@ -950,3 +950,31 @@ for (const mode of ['all', 'answer-only']) {
     }
   });
 }
+
+for (const [name, args, endpoint, expectedParams] of [
+  ['time_snapshot', { locations: ['Tokyo', 'London'], includeTransitions: true }, '/time/snapshot', { locations: 'Tokyo|London', includeTransitions: 'true' }],
+  ['convert_time', { from: 'Tokyo', to: ['London', 'Paris'], time: '3pm Tuesday' }, '/time/convert', { from: 'Tokyo', to: 'London|Paris', time: '3pm Tuesday' }],
+  ['get_overlap_hours', { locations: ['Tokyo', 'London'], date: 'next Friday' }, '/time/overlap', { locations: 'Tokyo|London', date: 'next Friday' }],
+  ['get_location_by_id', { id: 'findtime:victoria|CA|America/Vancouver' }, '/locations/findtime%3Avictoria%7CCA%7CAmerica%2FVancouver', {}],
+  ['answer_time_question', { query: 'Time in Tokyo', userTimezone: 'America/Los_Angeles' }, '/time/answer', { query: 'Time in Tokyo', userTimezone: 'America/Los_Angeles' }]
+]) {
+  test(`${name} preserves request arguments, authenticates, and returns API fields`, async () => {
+    const payload = { weekday: 'Tuesday', date: '2026-09-15', time24h: '15:00', utcOffset: '+09:00' };
+    let calls = 0;
+    const server = createFindtimeMcpServer({
+      apiBaseUrl: 'https://time-api.findtime.io', apiKey: 'test-only-key',
+      fetchImpl: async (url, init) => {
+        calls++;
+        const parsed = new URL(url);
+        assert.equal(parsed.pathname, endpoint);
+        for (const [key, value] of Object.entries(expectedParams)) assert.equal(parsed.searchParams.get(key), value);
+        assert.equal(init.headers.Authorization, 'Bearer test-only-key');
+        return { ok: true, status: 200, text: async () => JSON.stringify(payload) };
+      }
+    });
+    const result = await server.handleMessage({ jsonrpc: '2.0', id: 901, method: 'tools/call', params: { name, arguments: args } });
+    assert.equal(calls, 1);
+    assert.notEqual(result.result.isError, true);
+    for (const [key, value] of Object.entries(payload)) assert.equal(result.result.structuredContent[key], value);
+  });
+}
