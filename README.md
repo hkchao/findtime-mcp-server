@@ -1,5 +1,7 @@
 # @findtime/mcp-server
 
+[![M8ven Score](https://m8ven.ai/badge/mcp/findtime-mcp-server-s6kz8n?v=d6bb8bee04639f042b16c53a2608f80a)](https://m8ven.ai/mcp/findtime-mcp-server-s6kz8n)
+
 `@findtime/mcp-server` is a thin stdio MCP wrapper over the production findtime.io Time API at `https://time-api.findtime.io`.
 
 The package intentionally proxies the production API instead of re-implementing time logic locally. Current time, DST, conversion, overlap, meeting search, and location resolution should stay aligned with the live API.
