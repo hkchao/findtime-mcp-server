@@ -13,7 +13,8 @@
     "help-catalog.cjs",
     "README.md",
     "SKILL.md",
-    "examples"
+    "examples",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=20"
@@ -50,5 +51,5 @@
     "meeting-planner",
     "findtime.io"
   ],
-  "license": "UNLICENSED"
+  "license": "MIT"
 }

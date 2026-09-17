@@ -281,7 +281,7 @@ telemetry contact external services. Repeating a current-time query can return a
 new time; idempotent describes the absence of additional domain mutations.
 
 API-key environment variables are alternative configuration names for one key,
-not four separate credentials. The package remains `UNLICENSED`.
+not four separate credentials.
 
 ## Privacy, authentication, and service limits
 
@@ -307,3 +307,13 @@ This telemetry event does not include raw query text, API keys, or the per-call
 A generated installation identifier is stored in the user's state directory.
 Host-provided attribution identifiers are sent to the Time API as documented
 above; use opaque non-PII values.
+
+## License
+
+The MCP wrapper and documentation in this repository are licensed under the
+[MIT License](LICENSE).
+
+This license covers this repository only. It does not grant rights to the
+hosted findtime.io Time API, its backend implementation or data, or the broader
+findtime.io application. Use of hosted services remains subject to their
+applicable terms and API access requirements.
