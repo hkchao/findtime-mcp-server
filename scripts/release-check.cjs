@@ -39,6 +39,17 @@ function assertFileContains(filePath, snippets) {
 
 const packageJson = readJson(packageJsonPath);
 const version = packageJson.version;
+const registryPath = path.join(packageRoot, 'server.json');
+if (fs.existsSync(registryPath)) {
+  const registry = readJson(registryPath);
+  const npmPackage = registry.packages?.find((entry) =>
+    entry.registryType === 'npm' && entry.identifier === packageJson.name);
+  if (registry.name !== packageJson.mcpName || registry.version !== version ||
+      !npmPackage || npmPackage.version !== version) {
+    fail('server.json identity and all package versions must match package.json');
+  }
+}
+
 const requiredAck = String(version || '').trim();
 const actualAck = String(process.env.FINDTIME_MCP_RELEASE_CHECKED || '').trim();
 

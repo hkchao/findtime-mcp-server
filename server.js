@@ -73,7 +73,8 @@ const ANSWER_ONLY_TOOL_NAMES = new Set(['answer_time_question', 'get_findtime_he
 const TOOL_DEFINITIONS = [
   {
     name: 'answer_time_question',
-    description: 'PREFERRED entry point for time/timezone/scheduling questions. findtime.io classifies intent and dispatches internally. Use this WHENEVER the user\'s input includes a natural-language day or date qualifier, such as "Tuesday", "next Friday", "tomorrow", "tonight", "this weekend", "in 3 weeks", or "last Monday". The specific tools (convert_time, get_current_time, find_meeting_time, etc.) will silently drop these qualifiers if you dispatch to them without an explicit ISO date. Also the right choice for vague or mixed-intent prompts.',
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    description: 'PREFERRED entry point for vague, messy, or mixed time/timezone/scheduling questions. findtime.io classifies intent and dispatches internally. Use this when the user gives a raw natural-language prompt with a day or date qualifier, such as "Tuesday", "next Friday", "tomorrow", "tonight", "this weekend", "in 3 weeks", or "last Monday". If you already have structured arguments, the narrower tools can accept explicit ISO dates and simple human day/date values in their date fields where documented.',
     inputSchema: {
       type: 'object',
       required: ['query'],
@@ -114,6 +115,7 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: 'get_api_diagnostics',
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     description: 'Return MCP and findtime Time API diagnostics, including the running MCP version, latest published MCP version, API base URL, auth configuration, and a live health check.',
     inputSchema: {
       type: 'object',
@@ -126,6 +128,7 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: 'get_findtime_help',
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     description: 'Return enterprise-friendly findtime.io MCP usage help, including supported time-intelligence intents, answer API examples, ambiguity handling examples, and recommended answer-only deployment guidance.',
     inputSchema: {
       type: 'object',
@@ -138,6 +141,7 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: 'time_snapshot',
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     description: 'Return the production time snapshot payload for one location or a list of locations.',
     inputSchema: {
       type: 'object',
@@ -176,6 +180,7 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: 'get_current_time',
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     description: 'Return the production current time payload for a single city, query, or timezone. Exact country-name queries may be retried through a canonical city when the resolver can do so deterministically. For relative-date inputs ("Tuesday", "next Friday", "tomorrow", "tonight"), route to answer_time_question, which resolves the relative date and dispatches internally.',
     inputSchema: {
       type: 'object',
@@ -211,6 +216,7 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: 'get_dst_schedule',
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     description: 'Return the production DST schedule payload, including current abbreviation and transition details. For relative-date inputs ("this week", "next Friday", "tomorrow"), route to answer_time_question, which resolves the relative date and dispatches internally.',
     inputSchema: {
       type: 'object',
@@ -256,7 +262,8 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: 'convert_time',
-    description: 'Convert a source local time into one or more target locations using the production conversion endpoint. Use ONLY when date is an explicit ISO calendar date (YYYY-MM-DD) you can pass in, OR the conversion is for the current moment with no date qualifier at all. DO NOT use this tool if the user said "Tuesday", "tomorrow", "next Friday", or any other relative day/date phrase; those qualifiers will be silently dropped here. Route to answer_time_question instead, which parses relative dates correctly. When presenting results, copy localTime.weekday, localTime.date, localTime.time12h/time24h, timezone abbreviation, and UTC offset exactly from the tool output; do not recompute or shift day names during synthesis.',
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    description: 'Convert a source local time into one or more target locations using the production conversion endpoint. Use when you have structured source, target, and time arguments. date may be an explicit ISO calendar date (YYYY-MM-DD), or time may include a simple human date phrase such as "3pm Tuesday", "3pm thur", "3pm tomorrow", or "3pm next Friday"; findtime.io resolves that date relative to the source timezone. Route vague or mixed-intent raw prompts to answer_time_question. When presenting results, copy localTime.weekday, localTime.date, localTime.time12h/time24h, timezone abbreviation, and UTC offset exactly from the tool output; do not recompute or shift day names during synthesis.',
     inputSchema: {
       type: 'object',
       required: ['from', 'to', 'time'],
@@ -277,11 +284,11 @@ const TOOL_DEFINITIONS = [
         ),
         time: {
           type: 'string',
-          description: 'Source local time, such as "9:00 AM".'
+          description: 'Source local time, such as "9:00 AM"; may include a simple human date phrase such as "3pm Tuesday".'
         },
         date: {
           type: 'string',
-          description: 'Optional ISO date used as the conversion context.'
+          description: 'Optional date context. Prefer ISO YYYY-MM-DD, but simple human values such as "Thursday", "tomorrow", or "next Friday" are accepted.'
         }
       },
       additionalProperties: false
@@ -300,7 +307,8 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: 'get_overlap_hours',
-    description: 'Return shared business-hours overlap across multiple locations using the production overlap endpoint. For relative-date inputs ("this week", "next Friday", "tomorrow"), route to answer_time_question, which resolves the relative date and dispatches internally.',
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    description: 'Return shared business-hours overlap across multiple locations using the production overlap endpoint. Use when you have structured locations and, optionally, a date. date may be ISO YYYY-MM-DD or a simple human day/date value such as "Thursday", "tomorrow", or "next Friday"; findtime.io resolves it relative to the first location timezone. Route vague or mixed-intent raw prompts to answer_time_question.',
     inputSchema: {
       type: 'object',
       required: ['locations'],
@@ -313,7 +321,7 @@ const TOOL_DEFINITIONS = [
         ),
         date: {
           type: 'string',
-          description: 'Optional ISO date used to compute overlap.'
+          description: 'Optional date used to compute overlap. Prefer ISO YYYY-MM-DD, but simple human values such as "Thursday", "tomorrow", or "next Friday" are accepted.'
         }
       },
       additionalProperties: false
@@ -329,7 +337,8 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: 'find_meeting_time',
-    description: 'Return ranked meeting suggestions from the production meeting search endpoint. For relative-date inputs ("this week", "next Friday", "tomorrow"), route to answer_time_question, which resolves the relative date and dispatches internally.',
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    description: 'Return ranked meeting suggestions from the production meeting search endpoint. Use when you have structured locations and, optionally, a date. date may be ISO YYYY-MM-DD or a simple human day/date value such as "Thursday", "tomorrow", or "next Friday"; findtime.io resolves it relative to the first location timezone. Route vague or mixed-intent raw prompts to answer_time_question.',
     inputSchema: {
       type: 'object',
       required: ['locations'],
@@ -342,7 +351,7 @@ const TOOL_DEFINITIONS = [
         ),
         date: {
           type: 'string',
-          description: 'Optional ISO date to anchor the meeting search.'
+          description: 'Optional date to anchor the meeting search. Prefer ISO YYYY-MM-DD, but simple human values such as "Thursday", "tomorrow", or "next Friday" are accepted.'
         }
       },
       additionalProperties: false
@@ -358,6 +367,7 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: 'search_timezones',
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     description: 'Search production location records by city, country, or timezone-related query.',
     inputSchema: {
       type: 'object',
@@ -391,6 +401,7 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: 'get_location_by_id',
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     description: 'Hydrate an exact production location record by stable findtime id.',
     inputSchema: {
       type: 'object',
@@ -1450,10 +1461,11 @@ function createFindtimeMcpServer(options = {}) {
 
       if (method === 'tools/list') {
         return createSuccessResponse(message.id, {
-          tools: getVisibleToolDefinitions().map(({ name, description, inputSchema }) => ({
+          tools: getVisibleToolDefinitions().map(({ name, description, inputSchema, annotations }) => ({
             name,
             description,
-            inputSchema
+            inputSchema,
+            annotations
           }))
         });
       }

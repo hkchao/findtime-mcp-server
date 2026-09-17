@@ -263,3 +263,20 @@ npm run mcp:pack
 ```
 
 Treat this repo as the implementation source that originally produced the MCP package, not as the canonical public release source.
+
+## Publisher and tool safety
+
+The npm package `@findtime/mcp-server` and GitHub repository
+`hkchao/findtime-mcp-server` are the findtime.io MCP distribution channels.
+Product documentation: https://findtime.io/developers/mcp/
+
+All tools query time information, suggest meeting times, or return help and
+diagnostics; they do not book meetings or modify calendars. They declare
+`readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`, and
+`openWorldHint: true`. Read-only describes the user-facing operation, not an
+absence of network traffic: API requests, diagnostics, and optional usage
+telemetry contact external services. Repeating a current-time query can return a
+new time; idempotent describes the absence of additional domain mutations.
+
+API-key environment variables are alternative configuration names for one key,
+not four separate credentials. The package remains `UNLICENSED`.

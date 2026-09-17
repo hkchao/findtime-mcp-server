@@ -41,11 +41,17 @@ jobs:
             exit 1
           fi
 
+      - name: Check release metadata
+        run: npm run release:check
+
       - name: Run tests
         run: npm test
 
       - name: Pack package
         run: npm pack --dry-run
+
+      - name: Acknowledge validated release version
+        run: node -e 'require("fs").appendFileSync(process.env.GITHUB_ENV, "FINDTIME_MCP_RELEASE_CHECKED=" + require("./package.json").version + "\n")'
 
       - name: Publish package (manual dry run)
         if: github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'true'

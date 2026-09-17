@@ -3,6 +3,16 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 
+// This suite runs both in the standalone repository and inside world-time-ai.
+let expectedInstallMode = 'npm_package';
+try {
+  if (require(path.resolve(__dirname, '../../package.json')).name === 'world-time-ai') {
+    expectedInstallMode = 'repo_checkout';
+  }
+} catch (error) {
+  if (error.code !== 'MODULE_NOT_FOUND') throw error;
+}
+
 const {
   ContentLengthMessageBuffer,
   TOOL_DEFINITIONS,
@@ -61,18 +71,24 @@ test('convert_time tool description tells models to preserve returned date field
   assert.match(convertTool.description, /do not recompute or shift day names/);
 });
 
-test('tool descriptions route relative date phrases through answer_time_question', async () => {
+test('tool descriptions guide relative date phrases without denying structured tool support', async () => {
   const toolsByName = new Map(TOOL_DEFINITIONS.map((tool) => [tool.name, tool]));
 
   assert.match(toolsByName.get('answer_time_question').description, /PREFERRED entry point/);
   assert.match(toolsByName.get('answer_time_question').description, /next Friday/);
-  assert.match(toolsByName.get('answer_time_question').description, /silently drop these qualifiers/);
+  assert.match(toolsByName.get('answer_time_question').description, /vague, messy, or mixed/);
 
-  assert.match(toolsByName.get('convert_time').description, /Use ONLY when date is an explicit ISO calendar date/);
-  assert.match(toolsByName.get('convert_time').description, /DO NOT use this tool if the user said "Tuesday"/);
-  assert.match(toolsByName.get('convert_time').description, /Route to answer_time_question instead/);
+  assert.match(toolsByName.get('convert_time').description, /3pm Tuesday/);
+  assert.match(toolsByName.get('convert_time').description, /source timezone/);
+  assert.match(toolsByName.get('convert_time').description, /Route vague or mixed-intent raw prompts to answer_time_question/);
 
-  for (const toolName of ['get_current_time', 'get_dst_schedule', 'get_overlap_hours', 'find_meeting_time']) {
+  for (const toolName of ['get_overlap_hours', 'find_meeting_time']) {
+    assert.match(toolsByName.get(toolName).description, /simple human day\/date value/);
+    assert.match(toolsByName.get(toolName).description, /first location timezone/);
+    assert.match(toolsByName.get(toolName).description, /Route vague or mixed-intent raw prompts to answer_time_question/);
+  }
+
+  for (const toolName of ['get_current_time', 'get_dst_schedule']) {
     assert.match(toolsByName.get(toolName).description, /For relative-date inputs/);
     assert.match(toolsByName.get(toolName).description, /route to answer_time_question/);
   }
@@ -234,7 +250,7 @@ test('get_api_diagnostics reports MCP version, latest published MCP version, API
   assert.equal(response.result.structuredContent.mcpLatestVersion, '3.26.1');
   assert.equal(response.result.structuredContent.mcpLatestVersionCheck, 'ok');
   assert.equal(response.result.structuredContent.mcpUpToDate, response.result.structuredContent.mcpVersion === '3.26.1');
-  assert.equal(response.result.structuredContent.mcpInstallMode, 'repo_checkout');
+  assert.equal(response.result.structuredContent.mcpInstallMode, expectedInstallMode);
   assert.match(response.result.structuredContent.mcpExecutablePath, /(?:services\/mcp-server\/)?server\.js$/);
   assert.equal(response.result.structuredContent.apiBaseUrl, 'https://time-api.findtime.io');
   assert.equal(response.result.structuredContent.apiAuthConfigured, true);
@@ -289,7 +305,7 @@ test('get_api_diagnostics returns manual verification hints when the latest MCP 
     response.result.structuredContent.mcpRegistryUrl,
     /registry\.modelcontextprotocol\.io/
   );
-  assert.equal(response.result.structuredContent.mcpInstallMode, 'repo_checkout');
+  assert.equal(response.result.structuredContent.mcpInstallMode, expectedInstallMode);
 });
 
 test('search_timezones calls the production search endpoint with normalized params', async () => {
@@ -910,5 +926,27 @@ function invokeServerOverStdio({ serverPath, input, env }) {
         finish(reject, new Error(`timed out waiting for server response: ${stderr || stdout}`));
       }
     }, 2000);
+  });
+}
+
+for (const mode of ['all', 'answer-only']) {
+  test(`tools/list exposes explicit safety hints in ${mode} mode`, async () => {
+    const previous = process.env.FINDTIME_MCP_TOOL_MODE;
+    process.env.FINDTIME_MCP_TOOL_MODE = mode;
+    try {
+      const server = createFindtimeMcpServer({ fetchImpl: async () => {
+        throw new Error('Listing tools must not fetch');
+      } });
+      const response = await server.handleMessage({ jsonrpc: '2.0', id: 900, method: 'tools/list' });
+      assert.equal(response.result.tools.length, mode === 'all' ? 11 : 3);
+      for (const tool of response.result.tools) {
+        assert.deepEqual(tool.annotations, {
+          readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true
+        }, tool.name);
+      }
+    } finally {
+      if (previous === undefined) delete process.env.FINDTIME_MCP_TOOL_MODE;
+      else process.env.FINDTIME_MCP_TOOL_MODE = previous;
+    }
   });
 }
