@@ -48,64 +48,115 @@ Required runtime:
 
 ## Maintainer Release Playbook
 
-Use this checklist when publishing `@findtime/mcp-server`.
+Use this checklist when publishing `@findtime/mcp-server` to npm and `io.github.hkchao/findtime-mcp-server` to the official MCP Registry.
 
 Release source of truth:
 
-- Prefer the canonical public package repo when available.
-- In `world-time-ai`, the package implementation lives under `services/mcp-server`.
-- The package includes `server.js`, `help-catalog.cjs`, `README.md`, `SKILL.md`, and `examples`.
+- Publish only from the public package repo, `https://github.com/hkchao/findtime-mcp-server`, from a release tag `v<version>`.
+- In `world-time-ai`, the package implementation lives under `services/mcp-server`. Sync changes into the public repo first; never publish from `world-time-ai`.
+- The package includes `server.js`, `help-catalog.cjs`, `README.md`, `SKILL.md`, `LICENSE`, and `examples`.
+- `package.json` `version`, `server.json` `version`, and the npm entry's `version` in `server.json` `packages` must all match. `npm run release:check` and the registry workflow both fail when they don't.
 
-Pre-publish checks:
+Normal release (CI, the default path):
+
+1. On a branch in the public repo, bump `version` in `package.json` and both versions in `server.json`. Merge to `main` through review.
+2. Run the pre-publish checks below on the merged `main`.
+3. Tag the merge commit and push the tag. Every published version needs a tag: `v3.27.3` was published without one, so there is no record of what shipped.
 
 ```bash
-cd services/mcp-server  # or the standalone findtime-mcp-server package repo
-/usr/local/bin/npm run release:check
-/usr/local/bin/npm test
-/usr/local/bin/npm pack --dry-run
+git tag v<version> <merge-commit-sha>
+git push origin v<version>
 ```
 
-The release check is mandatory before publish. `prepublishOnly` will reject raw publishes unless the publisher sets the version-specific acknowledgement printed by `release:check`, for example `FINDTIME_MCP_RELEASE_CHECKED=3.27.0`. Set that variable only after reading this playbook and completing the pre-publish checks; it is deliberately version-specific so it cannot silently carry across future releases.
+4. The tag push starts `.github/workflows/publish.yml` ("Publish MCP Server"). Its npm job checks the tag matches `package.json`, runs `release:check`, `npm test` and `npm pack --dry-run`, sets `FINDTIME_MCP_RELEASE_CHECKED`, then runs `npm publish --provenance --access public` through npm trusted publishing (GitHub OIDC, no stored token).
+5. Only after npm succeeds, its registry job calls `.github/workflows/publish-mcp-registry.yml` ("Publish to MCP Registry") for the same tag, which runs `mcp-publisher login github-oidc` and `mcp-publisher publish`.
+6. Verify (below) and send the completion report.
 
-If `npm` is not on `PATH`, try `/usr/local/bin/npm`. Do not stop at `npm: command not found` until checking the absolute path.
+CI settings the release depends on (names only; never paste a secret value into chat, a commit, or a log):
+
+- npm trusted publisher on `@findtime/mcp-server` (npmjs.com, package Settings, Trusted Publisher): GitHub Actions, organization or user `hkchao`, repository `findtime-mcp-server`, workflow filename `publish.yml`, no environment, direct `npm publish` allowed. A new trusted publisher must complete its first successful publish within 2 days or it expires.
+- `package.json` `repository.url` must stay `git+https://github.com/hkchao/findtime-mcp-server.git`. npm rejects trusted publishes from a repo that doesn't match it.
+- `publish.yml` needs `permissions: id-token: write`, Node 24 and npm 11.5.1 or later. The job fails early if npm is older.
+- Repo secret `NPM_TOKEN` is only the fallback, used when a dispatch sets `npm_auth` to `token`. A write-enabled npm granular token lasts at most 90 days, so expect it to be expired unless someone just rotated it.
+- MCP Registry auth is GitHub OIDC (`mcp-publisher login github-oidc`), which allows `io.github.hkchao/*` from workflows in `hkchao` repos. No secret.
+
+Manual dispatch and re-runs:
+
+- Actions, "Publish MCP Server", Run workflow: use branch `main` and set `tag` to `v<version>`. `dry_run` defaults to true, which only validates and runs `npm publish --dry-run` (no npm publish, no registry). Untick `dry_run` for a real publish; a real dispatch runs the registry job after npm, the same as a tag push.
+- Dispatch from `main`, not from the tag. A run started from a tag uses the workflow file as it was when the tag was made, and tags made before trusted publishing (for example `v3.27.4`) still carry the old token-only workflow. For the same reason, "Re-run failed jobs" on an old tag run repeats the old failure.
+- Re-running is safe: if npm already has the version, the npm publish step is skipped and the registry job still runs; if the registry already has the version, the registry publish is skipped.
+- Registry only (npm already has the version): Actions, "Publish to MCP Registry", Run workflow, branch `main`, `tag` = `v<version>`. It refuses to run if npm doesn't have the version yet, because the registry checks the npm package's `mcpName`.
+
+Pre-publish checks (in a clean checkout of the public repo):
+
+```bash
+npm run release:check
+npm test
+npm pack --dry-run
+```
+
+The release check is mandatory before publish. `prepublishOnly` will reject raw publishes unless the publisher sets the version-specific acknowledgement printed by `release:check`, for example `FINDTIME_MCP_RELEASE_CHECKED=3.27.4`. Set that variable only after reading this playbook and completing the pre-publish checks; it is deliberately version-specific so it cannot silently carry across future releases. CI sets it after its own checks pass.
 
 Common publish blockers and fixes:
 
+- `E404 Not Found - PUT https://registry.npmjs.org/@findtime%2fmcp-server` for a package that exists: npm answers 404 instead of 403 when the credential can't publish this package. In CI that means trusted publishing didn't apply (no trusted publisher on the package, a field mismatch, or npm older than 11.5.1) and npm fell back to an expired, revoked, read-only or wrong-package `NPM_TOKEN`. Every tag publish from `v3.27.2` (Sep 2026) through `v3.27.4` failed this way; the `NPM_TOKEN` secret was last set in March 2026, so it had most likely expired. Check the trusted publisher fields and the job's npm version first; don't just paste a new token.
+- `ENEEDAUTH` or "Unable to authenticate" in CI: no usable credential. Check the trusted publisher's workflow filename is exactly `publish.yml` (case-sensitive, with `.yml`), the job has `id-token: write`, and it runs on a GitHub-hosted runner.
+- `E403` with `E_STAGE_REQUIRED`, or a version that lands in npm's Staged Packages instead of going live: the trusted publisher only allows `npm stage publish`. Allow direct `npm publish` on it, or approve the staged version with 2FA on npmjs.com.
+- Provenance errors (`E422`, "Error verifying sigstore provenance bundle", or a repository mismatch): `package.json` `repository.url` doesn't match `hkchao/findtime-mcp-server`, or the publish didn't come from GitHub Actions. Provenance only works from CI; for a hand publish drop `--provenance`.
 - `E403` with "Two-factor authentication or granular access token with bypass 2fa enabled is required": create a granular npm access token with **Read and write** access to `@findtime/mcp-server` and **Bypass two-factor authentication** enabled, or provide a fresh interactive npm OTP if the package permits OTP publishing.
-- Package settings must allow "Require two-factor authentication or a granular access token with bypass 2FA enabled." If package settings disallow tokens, granular tokens will still fail.
-- `EPERM` under `/Users/kchao/.npm/_cacache`: avoid root-owned npm cache issues by using `--cache /private/tmp/findtime-npm-cache`.
+- Package settings must allow "Require two-factor authentication or a granular access token with bypass 2FA enabled." If package settings disallow tokens, granular tokens will still fail. Trusted publishing keeps working either way.
+- `EOTP` after `npm whoami` succeeds: the CLI used the logged-in account auth instead of a bypass-capable granular token. If a bypass token is available, do not keep retrying normal `npm publish`; use the temporary `--userconfig` token publish pattern below.
+- `EPERM` under `~/.npm/_cacache`: avoid root-owned npm cache issues by pointing `--cache` at a fresh temp directory, for example `--cache "$(mktemp -d)"`.
 - `ENOTFOUND registry.npmjs.org` or similar DNS/network failures from the sandbox: retry the publish with network escalation instead of assuming the package or token is broken.
+- MCP Registry rejects the publish: check that npm already has the version, that `server.json` versions match `package.json`, and that `server.json` `name` equals `package.json` `mcpName`.
 - If a token is pasted into chat or echoed in terminal output, tell the user to revoke it immediately after publish.
+
+Manual fallback publish (only when CI can't publish and the release can't wait):
+
+A maintainer of `@findtime/mcp-server` with 2FA publishes from a clean checkout of the tag, never from a working tree with local changes:
+
+```bash
+git clone https://github.com/hkchao/findtime-mcp-server.git findtime-mcp-release
+cd findtime-mcp-release
+git checkout v<version>
+npm run release:check
+npm test
+npm pack --dry-run
+FINDTIME_MCP_RELEASE_CHECKED=<version> npm publish --access public
+```
+
+npm asks for 2FA during publish. A hand publish has no provenance. Then run the registry-only dispatch above, verify, and delete the temporary clone.
 
 Safer token publish pattern:
 
+Use this path first when the user has provided a granular npm token with bypass 2FA. Do not rely on `npm whoami` as proof that publish will not need an OTP. Do not put the raw token directly in the shell command string, because command strings can be logged by shells, terminals, approval prompts, or process listings. Run it from a clean checkout of the release tag.
+
 ```bash
-cd services/mcp-server
 trap 'stty echo' EXIT
 stty -echo
 read NPM_TOKEN
 stty echo
 trap - EXIT
 export NODE_AUTH_TOKEN="$NPM_TOKEN"
-mkdir -p /private/tmp/findtime-npm-cache
-printf '//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}\n' > /private/tmp/findtime-mcp-npmrc
-/usr/local/bin/npm publish --access public \
-  --userconfig /private/tmp/findtime-mcp-npmrc \
-  --cache /private/tmp/findtime-npm-cache
-rm /private/tmp/findtime-mcp-npmrc
+unset NPM_TOKEN
+RELEASE_TMP="$(mktemp -d)"
+printf '//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}\n' > "$RELEASE_TMP/npmrc"
+FINDTIME_MCP_RELEASE_CHECKED=<version> npm publish --access public \
+  --userconfig "$RELEASE_TMP/npmrc" \
+  --cache "$RELEASE_TMP/cache"
+rm -rf "$RELEASE_TMP"
+unset NODE_AUTH_TOKEN
 ```
+
+If the first publish attempt already failed with `EOTP`, rerun the same publish through this token-backed npmrc path instead of asking for a new token. A valid token can still fail OTP if it was not actually the auth source used by npm.
 
 After publishing, verify the live package:
 
 ```bash
-/usr/local/bin/npm view @findtime/mcp-server@<version> version \
-  --prefer-online \
-  --cache /private/tmp/findtime-npm-cache-verify
-/usr/local/bin/npm dist-tag ls @findtime/mcp-server \
-  --cache /private/tmp/findtime-npm-cache-verify
-/usr/local/bin/npm view @findtime/mcp-server version \
-  --prefer-online \
-  --cache /private/tmp/findtime-npm-cache-verify
+VERIFY_CACHE="$(mktemp -d)"
+npm view @findtime/mcp-server@<version> version --prefer-online --cache "$VERIFY_CACHE"
+npm dist-tag ls @findtime/mcp-server --cache "$VERIFY_CACHE"
+npm view @findtime/mcp-server version --prefer-online --cache "$VERIFY_CACHE"
 ```
 
 Do not trust a single `npm view @findtime/mcp-server version` result immediately after publish if it returns the old version. npm can show a stale cached `latest` lookup even after `npm publish` reports success. Confirm all three facts before calling the release done:
@@ -116,13 +167,31 @@ Do not trust a single `npm view @findtime/mcp-server version` result immediately
 
 If the direct version exists and `latest` is correct but a plain `npm view` still shows the old version, treat it as cache/propagation lag and retry with a new temp cache. If `latest` is wrong, fix the dist-tag explicitly before reporting success.
 
+Then verify the registry and the hosted server:
+
+```bash
+# MCP Registry: HTTP 200, the new version, and remotes listing https://mcp.findtime.io/mcp
+curl -s "https://registry.modelcontextprotocol.io/v0/servers/io.github.hkchao%2Ffindtime-mcp-server/versions/<version>"
+curl -s "https://registry.modelcontextprotocol.io/v0/servers/io.github.hkchao%2Ffindtime-mcp-server/versions/latest"
+# Hosted remote: an unauthenticated initialize must return 401 with a WWW-Authenticate resource_metadata header
+curl -si -X POST https://mcp.findtime.io/mcp \
+  -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"release-check","version":"0"}}}'
+curl -s https://mcp.findtime.io/.well-known/oauth-protected-resource
+```
+
+Glama syncs from the registry on its own schedule: check `https://glama.ai/mcp/servers/hkchao/findtime-mcp-server` shows the new version and the hosted remote, and note in the report if it hasn't caught up yet.
+
 Expected release completion report:
 
-- commit SHA and pushed branch
-- npm version published
+- commit SHA, release tag, and links to the "Publish MCP Server" and "Publish to MCP Registry" runs
+- npm version published and whether it carries provenance
 - `latest` dist-tag value
 - test status from `prepublishOnly`
 - tarball contents sanity check
+- MCP Registry: `versions/<version>` returns 200, `isLatest` is true, and the remotes list `https://mcp.findtime.io/mcp`
+- hosted remote `https://mcp.findtime.io/mcp`: 401 with `resource_metadata`, and the protected-resource metadata returns 200
+- Glama: version shown, or not yet synced
 - deploy impact: publishing the MCP package does not redeploy `time-api.findtime.io`; Time API only needs a separate deploy if upstream request handling or attribution ingestion changed
 - reminder to revoke any short-lived token used during the release
 

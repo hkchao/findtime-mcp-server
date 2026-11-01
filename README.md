@@ -250,12 +250,22 @@ The canonical public source for this package now lives in:
 
 Publish and version updates should happen from that public repo, not from this private app repo.
 
-Standard publish flow in the public repo:
+Releases publish from CI when a `v<version>` tag is pushed: `.github/workflows/publish.yml` publishes to npm with trusted publishing (GitHub OIDC), then calls `.github/workflows/publish-mcp-registry.yml` to publish `server.json` to the MCP Registry. The full runbook (manual dispatch, re-runs, error fixes, and the hand-publish fallback) is the "Maintainer Release Playbook" in `SKILL.md`.
+
+Standard release flow in the public repo, after bumping `package.json` and `server.json` and merging to `main`:
 
 ```bash
+npm run release:check
 npm test
 npm pack --dry-run
-npm publish --access public
+git tag v<version> <merge-commit-sha>
+git push origin v<version>
+```
+
+Hand publishing is a fallback only. `prepublishOnly` rejects it unless you set the acknowledgement that `release:check` prints:
+
+```bash
+FINDTIME_MCP_RELEASE_CHECKED=<version> npm publish --access public
 ```
 
 The equivalent local verification checks in this repo are:

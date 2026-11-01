@@ -1,51 +1,122 @@
 name: Publish to MCP Registry
 
+# Publishes server.json from a release tag to the official MCP Registry
+# (io.github.hkchao/findtime-mcp-server) using GitHub OIDC. npm must already
+# have the same version, because the registry checks the npm package's mcpName.
+#
+# Triggers:
+# - workflow_call from publish.yml, after npm publish succeeds (tag pushes and real dispatches).
+# - workflow_dispatch from main with `tag` (e.g. v3.27.4) to publish or re-run the registry step on its own.
+# Runbook: "Maintainer Release Playbook" in SKILL.md.
+
 on:
   workflow_dispatch:
-  workflow_run:
-    workflows:
-      - Publish MCP Server
-    types:
-      - completed
+    inputs:
+      tag:
+        description: Release tag whose server.json to publish, e.g. v3.27.4 (npm must already have this version)
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      tag:
+        description: Release tag whose server.json to publish
+        required: true
+        type: string
+
+permissions:
+  contents: read
 
 jobs:
   publish:
-    if: |
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'workflow_run' &&
-        github.event.workflow_run.conclusion == 'success' &&
-        github.event.workflow_run.event == 'push')
     runs-on: ubuntu-latest
     permissions:
       id-token: write
       contents: read
-
+    env:
+      SERVER_NAME: io.github.hkchao/findtime-mcp-server
+      REGISTRY_API: https://registry.modelcontextprotocol.io/v0/servers/io.github.hkchao%2Ffindtime-mcp-server
+      TAG: ${{ inputs.tag }}
     steps:
-      - name: Checkout code
+      - name: Checkout release tag
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+          ref: refs/tags/${{ inputs.tag }}
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: '24'
 
-      - name: Verify server.json version matches package.json
+      - name: Verify tag, package.json and server.json versions match
+        id: meta
         run: |
           PACKAGE_VERSION=$(node -p "require('./package.json').version")
           SERVER_VERSION=$(node -p "require('./server.json').version")
-          if [ "$PACKAGE_VERSION" != "$SERVER_VERSION" ]; then
-            echo "package.json version ($PACKAGE_VERSION) does not match server.json version ($SERVER_VERSION)"
+          NPM_ENTRY_VERSION=$(node -p "(require('./server.json').packages || []).find(p => p.registryType === 'npm').version")
+          if [ "$PACKAGE_VERSION" != "$SERVER_VERSION" ] || [ "$PACKAGE_VERSION" != "$NPM_ENTRY_VERSION" ]; then
+            echo "::error::package.json ($PACKAGE_VERSION), server.json ($SERVER_VERSION) and server.json packages[npm] ($NPM_ENTRY_VERSION) must match"
+            exit 1
+          fi
+          if [ "$TAG" != "v$PACKAGE_VERSION" ]; then
+            echo "::error::Tag $TAG does not match package.json version $PACKAGE_VERSION"
+            exit 1
+          fi
+          echo "version=$PACKAGE_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Require the version on npm first
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/@findtime%2fmcp-server/$VERSION")
+          if [ "$CODE" != "200" ]; then
+            echo "::error::@findtime/mcp-server@$VERSION is not on npm (HTTP $CODE). Publish npm first (publish.yml)."
             exit 1
           fi
 
+      - name: Check whether the registry already has this version
+        id: existing
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' "$REGISTRY_API/versions/$VERSION")
+          if [ "$CODE" = "200" ]; then
+            echo "$SERVER_NAME $VERSION is already in the MCP Registry; skipping publish."
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Install mcp-publisher
+        if: steps.existing.outputs.published != 'true'
         run: |
           curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
 
       - name: Authenticate to MCP Registry
+        if: steps.existing.outputs.published != 'true'
         run: ./mcp-publisher login github-oidc
 
       - name: Publish server to MCP Registry
+        if: steps.existing.outputs.published != 'true'
         run: ./mcp-publisher publish
+
+      - name: Verify the registry lists this version and the hosted remote
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          for i in 1 2 3 4 5 6; do
+            if curl -sf "$REGISTRY_API/versions/$VERSION" -o entry.json; then
+              node -e '
+                const e = require("./entry.json"); const s = e.server || e;
+                const remotes = (s.remotes || []).map(r => r.url);
+                console.log("registry version:", s.version, "remotes:", remotes.join(", ") || "(none)");
+                const expected = require("./server.json").remotes || [];
+                const missing = expected.filter(r => !remotes.includes(r.url));
+                if (missing.length) { console.error("missing remotes: " + missing.map(r => r.url).join(", ")); process.exit(1); }
+              '
+              exit $?
+            fi
+            sleep 10
+          done
+          echo "::error::MCP Registry does not list $SERVER_NAME $VERSION"
+          exit 1

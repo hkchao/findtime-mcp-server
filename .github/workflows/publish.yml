@@ -1,44 +1,129 @@
 name: Publish MCP Server
 
+# Publishes @findtime/mcp-server to npm with npm trusted publishing (GitHub OIDC),
+# then publishes the same tag's server.json to the official MCP Registry.
+# Runbook: "Maintainer Release Playbook" in SKILL.md.
+#
+# Triggers:
+# - push of a tag v<version>: real publish of that tag.
+# - workflow_dispatch: run from main with `tag` (e.g. v3.27.4). dry_run defaults to true.
+#   Run it from main, not from the tag, so the current workflow file is used.
+
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: Package version to publish from package.json
-        required: false
-        type: string
-      dry_run:
-        description: Run npm publish in dry-run mode
-        required: false
-        default: true
-        type: boolean
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish, e.g. v3.27.4. Empty = the ref this run starts from.
+        required: false
+        type: string
+      dry_run:
+        description: Dry run only (npm publish --dry-run, no MCP Registry). Untick to publish for real.
+        required: false
+        default: true
+        type: boolean
+      npm_auth:
+        description: npm auth. oidc = trusted publishing (normal). token = fallback using the NPM_TOKEN secret.
+        required: false
+        default: oidc
+        type: choice
+        options:
+          - oidc
+          - token
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-mcp-server-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
-  publish:
+  npm:
+    name: Publish to npm
     runs-on: ubuntu-latest
     permissions:
       contents: read
       id-token: write
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
+      version: ${{ steps.meta.outputs.version }}
+    env:
+      PACKAGE_NAME: '@findtime/mcp-server'
+      INPUT_TAG: ${{ inputs.tag }}
     steps:
-      - name: Checkout repository
+      - name: Resolve ref to publish
+        id: ref
+        run: |
+          if [ -n "$INPUT_TAG" ]; then
+            echo "ref=refs/tags/$INPUT_TAG" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=$GITHUB_REF" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout release ref
         uses: actions/checkout@v6
+        with:
+          ref: ${{ steps.ref.outputs.ref }}
+          persist-credentials: false
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: '20'
+          node-version: '24'
           registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
 
-      - name: Verify requested version
-        if: github.event_name == 'workflow_dispatch' && github.event.inputs.version != ''
+      - name: Check npm supports trusted publishing (>= 11.5.1)
         run: |
-          PACKAGE_VERSION=$(node -p "require('./package.json').version")
-          if [ "$PACKAGE_VERSION" != "${{ github.event.inputs.version }}" ]; then
-            echo "Expected version ${{ github.event.inputs.version }} but found $PACKAGE_VERSION"
-            exit 1
+          npm --version
+          node -e '
+            const [a, b, c] = process.argv[1].split(".").map(Number);
+            const ok = a > 11 || (a === 11 && (b > 5 || (b === 5 && c >= 1)));
+            if (!ok) { console.error("npm " + process.argv[1] + " is older than 11.5.1; trusted publishing needs 11.5.1+"); process.exit(1); }
+          ' "$(npm --version)"
+
+      - name: Resolve and verify release version
+        id: meta
+        env:
+          REF: ${{ steps.ref.outputs.ref }}
+          EVENT_NAME: ${{ github.event_name }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          case "$REF" in
+            refs/tags/*)
+              TAG="${REF#refs/tags/}"
+              if [ "$TAG" != "v$VERSION" ]; then
+                echo "::error::Tag $TAG does not match package.json version $VERSION (expected v$VERSION)"
+                exit 1
+              fi
+              ;;
+            *)
+              TAG="v$VERSION"
+              if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$DRY_RUN" != "true" ]; then
+                echo "::error::A real publish must name a release tag (dispatch with tag=v$VERSION, or push the tag)"
+                exit 1
+              fi
+              ;;
+          esac
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Publishing $PACKAGE_NAME@$VERSION from $REF"
+
+      - name: Check whether this version is already on npm
+        id: existing
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/@findtime%2fmcp-server/$VERSION")
+          if [ "$CODE" = "200" ]; then
+            echo "$PACKAGE_NAME@$VERSION is already on npm; npm publish will be skipped and the MCP Registry job still runs."
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Check release metadata
@@ -51,22 +136,51 @@ jobs:
         run: npm pack --dry-run
 
       - name: Acknowledge validated release version
-        run: node -e 'require("fs").appendFileSync(process.env.GITHUB_ENV, "FINDTIME_MCP_RELEASE_CHECKED=" + require("./package.json").version + "\n")'
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: echo "FINDTIME_MCP_RELEASE_CHECKED=$VERSION" >> "$GITHUB_ENV"
 
-      - name: Publish package (manual dry run)
-        if: github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'true'
+      - name: Publish package (dry run)
+        if: github.event_name == 'workflow_dispatch' && inputs.dry_run
         run: npm publish --dry-run --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: Publish package (manual)
-        if: github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run != 'true'
+      - name: Publish package (trusted publishing)
+        if: >-
+          steps.existing.outputs.published != 'true' &&
+          (github.event_name == 'push' ||
+           (github.event_name == 'workflow_dispatch' && !inputs.dry_run && inputs.npm_auth != 'token'))
+        run: npm publish --provenance --access public
+
+      - name: Publish package (NPM_TOKEN fallback)
+        if: >-
+          steps.existing.outputs.published != 'true' &&
+          github.event_name == 'workflow_dispatch' && !inputs.dry_run && inputs.npm_auth == 'token'
         run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: Publish package (tag)
-        if: github.event_name == 'push'
-        run: npm publish --access public
+      - name: Verify npm shows the new version and latest dist-tag
+        if: github.event_name == 'push' || !inputs.dry_run
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            V=$(curl -s "https://registry.npmjs.org/@findtime%2fmcp-server/$VERSION" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).version||"")}catch{console.log("")}})')
+            L=$(curl -s "https://registry.npmjs.org/-/package/@findtime%2fmcp-server/dist-tags" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{console.log(JSON.parse(s).latest||"")}catch{console.log("")}})')
+            echo "attempt $i: version=$V latest=$L"
+            if [ "$V" = "$VERSION" ] && [ "$L" = "$VERSION" ]; then exit 0; fi
+            sleep 15
+          done
+          echo "::error::npm does not show $PACKAGE_NAME@$VERSION as latest after publish"
+          exit 1
+
+  registry:
+    name: Publish to MCP Registry
+    needs: npm
+    if: github.event_name == 'push' || !inputs.dry_run
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/publish-mcp-registry.yml
+    with:
+      tag: ${{ needs.npm.outputs.tag }}
