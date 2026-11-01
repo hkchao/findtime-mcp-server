@@ -12,7 +12,22 @@ Published surfaces:
 - GitHub: `https://github.com/hkchao/findtime-mcp-server`
 - Official MCP Registry: `https://registry.modelcontextprotocol.io/?q=io.github.hkchao%2Ffindtime-mcp-server`
 - MCP Registry name: `io.github.hkchao/findtime-mcp-server`
-- Hosted server: `https://mcp.findtime.io/mcp` (Streamable HTTP, OAuth sign-in). It includes the time tools plus booking tools (request, reschedule and cancel bookings; host approve/decline; booking pages and invite links; saved teams). The npm package covers the time tools only and needs `FINDTIME_TIME_API_KEY`.
+- Hosted server: `https://mcp.findtime.io/mcp` (Streamable HTTP, OAuth sign-in). It includes the time tools and saved teams. Booking tools (request, reschedule and cancel bookings; host approve/decline; booking pages and invite links) are off by default and appear only for accounts where findtime has turned them on. See [Hosted server scopes](#hosted-server-scopes) for which OAuth scope covers which tool. The npm package covers the time tools only and needs `FINDTIME_TIME_API_KEY`.
+
+## Hosted server scopes
+
+The hosted server's OAuth metadata (`/.well-known/oauth-protected-resource` and `/.well-known/oauth-authorization-server`) lists only the two default scopes, `time:read` and `meetings:plan`. A client that connects without naming a scope gets both. The booking scopes, `booking:request` and `booking:host`, are left out of `scopes_supported` on purpose, so a client that copies that list on first connect never asks for host access. They are still granted when a client asks for them by name.
+
+When a signed-in client calls a booking tool without the scope it needs, the server answers `403` with `WWW-Authenticate: Bearer error="insufficient_scope", scope="..."`. The `scope` value is the full set to ask for on the next sign-in. Asking for `booking:host` shows a findtime consent screen before Google sign-in.
+
+| Scope | Tools |
+| --- | --- |
+| `time:read` | All time tools not listed below, plus `get_team`, `list_teams`, the booking reads `get_host_booking_profile`, `find_host_slots`, `get_booking_status`, `list_my_booking_requests`, and `cancel_booking` (a guest cancelling their own request; it needs the tracking or history token returned when the request was sent) |
+| `meetings:plan` | `find_meeting_time`, `get_overlap_hours`, `save_team`, `rename_team`, `delete_team` |
+| `booking:request` | `request_booking`, `reschedule_booking` |
+| `booking:host` | `get_my_booking_page`, `list_booking_requests`, `approve_booking_request`, `decline_booking_request`, `cancel_booking_as_host`, `update_booking_page`, `create_invite_link`, `revoke_invite_link` |
+
+The findtime booking API checks `booking:request` and `booking:host` again on its side, using a signed assertion from the hosted server. Those tools also need the person signed in to findtime with Google and a verified email. Finding a host's open times needs no booking scope. A Time API key (`ftk_live_...`) used as a bearer token gets `time:read meetings:plan` only and never sees the booking tools.
 
 ## Tool surface
 
