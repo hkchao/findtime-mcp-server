@@ -12,7 +12,7 @@ Published surfaces:
 - GitHub: `https://github.com/hkchao/findtime-mcp-server`
 - Official MCP Registry: `https://registry.modelcontextprotocol.io/?q=io.github.hkchao%2Ffindtime-mcp-server`
 - MCP Registry name: `io.github.hkchao/findtime-mcp-server`
-- Hosted server: `https://mcp.findtime.io/mcp` (Streamable HTTP, OAuth sign-in). It includes the time tools and saved teams. Booking tools (request, reschedule and cancel bookings; host approve/decline; booking pages and invite links) are off by default and appear only for accounts where findtime has turned them on. See [Hosted server scopes](#hosted-server-scopes) for which OAuth scope covers which tool. The npm package covers the time tools only and needs `FINDTIME_TIME_API_KEY`.
+- Hosted server: `https://mcp.findtime.io/mcp` (Streamable HTTP, OAuth sign-in). It includes the time tools and saved teams. Booking tools (request, reschedule and cancel bookings; host approve/decline; booking pages and invite links) are available after you sign in with Google through the connector and grant the booking scopes. See [Hosted server scopes](#hosted-server-scopes) for which OAuth scope covers which tool. The npm package covers the time tools only and needs `FINDTIME_TIME_API_KEY`.
 
 ## Hosted server scopes
 
