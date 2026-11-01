@@ -957,6 +957,27 @@ function ensureAtLeastOne(args, keys, message) {
   }
 }
 
+// The server's own body and message, passed through to the agent as-is.
+function serverReply(response) {
+  const res = response || {};
+  let body = res.parsedBody;
+  if (body && typeof body === 'object' && !Array.isArray(body)
+    && Object.keys(body).length === 1 && typeof body.rawBody === 'string') {
+    body = body.rawBody.trim() ? body.rawBody : undefined;
+  }
+  if (body === undefined && typeof res.rawBody === 'string' && res.rawBody.trim()) {
+    body = res.rawBody;
+  }
+  let message = null;
+  if (body && typeof body === 'object') {
+    const candidate = body.message || body.error;
+    if (typeof candidate === 'string' && candidate.trim()) message = candidate.trim();
+  } else if (typeof body === 'string') {
+    message = body.trim().slice(0, 500);
+  }
+  return { body, message };
+}
+
 function parseRetryAfterSeconds(value, now = Date.now()) {
   if (value === undefined || value === null || value === '') return null;
   const text = String(value).trim();
@@ -1004,7 +1025,9 @@ function feedbackFailureResult(tool, response, status) {
     nextStep = 'Do not retry with the same arguments: check that tool names a findtime.io MCP tool, then call send_feedback again.';
   }
   const statusText = status !== null ? `HTTP ${status}` : (res.networkError || 'no response');
-  const whatWentWrong = `The feedback was not sent: findtime.io did not accept it (${reason}, ${statusText}).`;
+  const server = serverReply(res);
+  const whatWentWrong = `The feedback was not sent: findtime.io did not accept it (${reason}, ${statusText}).`
+    + (server.message ? ` Server said: ${server.message}` : '');
   const structuredContent = {
     ok: false,
     sent: false,
@@ -1017,6 +1040,8 @@ function feedbackFailureResult(tool, response, status) {
     ...(res.retryAfter ? { retryAfter: res.retryAfter } : {}),
     ...(retryAfterSeconds !== null ? { retryAfterSeconds } : {}),
     ...(status === null && res.networkError ? { networkError: res.networkError } : {}),
+    ...(server.body !== undefined ? { serverResponse: server.body } : {}),
+    ...(server.message ? { serverMessage: server.message } : {}),
     whatWentWrong,
     nextStep,
     nextAction: {
@@ -1733,21 +1758,43 @@ function createFindtimeMcpServer(options = {}) {
         networkError: String(error && error.message ? error.message : error)
       }));
       const status = Number.isInteger(feedbackResponse && feedbackResponse.status) ? feedbackResponse.status : null;
-      // Only a 2xx from findtime.io counts as sent.
+      // Only a 2xx from findtime.io counts as sent. Report the server's own answer:
+      // 202 = recorded, 204 = received but not kept, any other 2xx = accepted.
       if (feedbackResponse && feedbackResponse.ok && status !== null && status >= 200 && status < 300) {
-        const message = `findtime.io received the feedback (HTTP ${status}). Sent exactly ${JSON.stringify(sentBody)}; `
-          + 'the query, whatWasWrong and expectedAnswer stayed local and were not sent.';
+        const server = serverReply(feedbackResponse);
+        const sentText = `Sent exactly ${JSON.stringify(sentBody)}; the query, whatWasWrong and expectedAnswer stayed local and were not sent.`;
+        let outcome;
+        let recorded;
+        let lead;
+        if (status === 202) {
+          outcome = 'recorded';
+          recorded = true;
+          lead = 'findtime.io recorded the feedback (HTTP 202).';
+        } else if (status === 204) {
+          outcome = 'not_kept';
+          recorded = false;
+          lead = 'findtime.io got the report but did not keep it (HTTP 204), so nothing was recorded. This is not an error; do not retry.';
+        } else {
+          outcome = 'accepted';
+          recorded = null;
+          lead = `findtime.io accepted the feedback (HTTP ${status}).`;
+        }
+        const message = `${lead} ${sentText}${server.message ? ` Server said: ${server.message}` : ''}`;
         return {
           content: [{ type: 'text', text: message }],
           structuredContent: {
             ok: true,
             sent: true,
-            recorded: true,
+            outcome,
+            recorded,
+            retryable: false,
             errorClass: 'agent_feedback',
             status,
             tool,
             sentBody,
-            message
+            message,
+            ...(server.body !== undefined ? { serverResponse: server.body } : {}),
+            ...(server.message ? { serverMessage: server.message } : {})
           }
         };
       }

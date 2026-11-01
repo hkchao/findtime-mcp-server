@@ -54,7 +54,7 @@ Release source of truth:
 
 - Publish only from the public package repo, `https://github.com/hkchao/findtime-mcp-server`, from a release tag `v<version>`.
 - In `world-time-ai`, the package implementation lives under `services/mcp-server`. Sync changes into the public repo first; never publish from `world-time-ai`.
-- The package includes `server.js`, `actionable-errors.cjs`, `help-catalog.cjs`, `README.md`, `SKILL.md`, `LICENSE`, and `examples`. It never includes `booking-tools.cjs`: booking tools are hosted-only.
+- The package includes `server.js`, `actionable-errors.cjs`, `help-catalog.cjs`, `README.md`, `SKILL.md`, `LICENSE`, and `examples`. It never includes `booking-tools.cjs`: booking tools are hosted-only. This repo's `README.md` is the source copy, including the hosted-scope table; port README changes from here to `services/mcp-server/README.md` in `world-time-ai`, not the other way round.
 - `package.json` `version`, `server.json` `version`, and the npm entry's `version` in `server.json` `packages` must all match. `npm run release:check` and the registry workflow both fail when they don't.
 
 Normal release (CI, the default path):

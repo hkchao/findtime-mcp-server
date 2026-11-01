@@ -166,7 +166,7 @@ test('send_feedback posts the tool name to /mcp/feedback and never the query tex
     whatWasWrong: 'wrong offset'
   });
   assert.equal(result.isError, undefined);
-  assert.equal(result.structuredContent.recorded, true);
+  assert.equal(result.structuredContent.sent, true);
   const [call] = toolCalls(calls, 'send_feedback');
   assert.equal(call.init.method, 'POST');
   assert.equal(call.url.pathname, '/mcp/feedback');
@@ -288,18 +288,52 @@ async function sendFeedback(fetchOptions, serverOptions = {}) {
   return { result, calls };
 }
 
-test('send_feedback on a 2xx says exactly what was sent and that findtime received it', async () => {
-  const { result, calls } = await sendFeedback({ status: 201 });
+test('send_feedback on 202 says findtime.io recorded it and exactly what was sent', async () => {
+  const { result, calls } = await sendFeedback({ status: 202, body: { ok: true, recorded: true, dropped: false } });
   assert.equal(result.isError, undefined);
   const sc = result.structuredContent;
   assert.equal(sc.ok, true);
   assert.equal(sc.sent, true);
-  assert.equal(sc.status, 201);
+  assert.equal(sc.outcome, 'recorded');
+  assert.equal(sc.recorded, true);
+  assert.equal(sc.status, 202);
   assert.deepEqual(sc.sentBody, { tool: 'convert_time' });
-  assert.match(result.content[0].text, /received/);
+  assert.deepEqual(sc.serverResponse, { ok: true, recorded: true, dropped: false });
+  assert.match(result.content[0].text, /recorded the feedback \(HTTP 202\)/);
   assert.match(result.content[0].text, /\{"tool":"convert_time"\}/);
   assert.equal(result.content[0].text.includes('Paris'), false);
   assert.equal(calls.length, 1);
+});
+
+test('send_feedback on 204 says plainly it was received but not kept, without an error', async () => {
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url: new URL(url), init });
+    return { ok: true, status: 204, headers: { get: () => null }, async text() { return ''; } };
+  };
+  const result = await callTool(makeServer(calls, { fetchImpl }), 'send_feedback', FEEDBACK_ARGS);
+  assert.equal(result.isError, undefined);
+  const sc = result.structuredContent;
+  assert.equal(sc.ok, true);
+  assert.equal(sc.outcome, 'not_kept');
+  assert.equal(sc.recorded, false);
+  assert.equal(sc.retryable, false);
+  assert.equal(sc.status, 204);
+  assert.equal(sc.serverResponse, undefined);
+  assert.match(result.content[0].text, /did not keep it/);
+  assert.match(result.content[0].text, /not an error/);
+  assert.equal(calls.length, 1);
+});
+
+test('send_feedback on another 2xx is a neutral accepted and passes the server message through', async () => {
+  const { result } = await sendFeedback({ status: 201, body: { message: 'thanks' } });
+  assert.equal(result.isError, undefined);
+  const sc = result.structuredContent;
+  assert.equal(sc.outcome, 'accepted');
+  assert.equal(sc.recorded, null);
+  assert.equal(sc.serverMessage, 'thanks');
+  assert.match(result.content[0].text, /accepted the feedback \(HTTP 201\)/);
+  assert.match(result.content[0].text, /Server said: thanks/);
 });
 
 test('send_feedback on 429 is a retryable rate_limited error with Retry-After', async () => {
@@ -325,6 +359,8 @@ test('send_feedback on 500 is a retryable server_error', async () => {
   assert.equal(sc.status, 500);
   assert.equal(sc.retryable, true);
   assert.equal(sc.retryAfterSeconds, undefined);
+  assert.equal(sc.serverMessage, 'boom');
+  assert.match(result.content[0].text, /Server said: boom/);
   assert.ok(sc.nextStep);
 });
 

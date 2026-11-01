@@ -349,7 +349,10 @@ tool errors. It does not expose a public HTTP listener or implement a separate
 local rate limiter. Help is local; diagnostics also reads npm version metadata.
 
 `send_feedback` posts only the tool name to `/mcp/feedback` on the configured
-Time API. It never sends the query text or `whatWasWrong`.
+Time API. It never sends the query text or `whatWasWrong`. The result reports
+the server's answer: `202` means recorded, `204` means findtime.io received the
+report but did not keep it (not an error, nothing to retry), and any other
+`2xx` means accepted. Other statuses are error results.
 
 Optional usage telemetry goes to `https://slack.findtime.io/telemetry/usage` by
 default. The wrapper sends tool name, outcome, query-text length, a persistent
