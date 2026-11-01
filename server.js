@@ -957,6 +957,84 @@ function ensureAtLeastOne(args, keys, message) {
   }
 }
 
+function parseRetryAfterSeconds(value, now = Date.now()) {
+  if (value === undefined || value === null || value === '') return null;
+  const text = String(value).trim();
+  if (/^\d+$/.test(text)) return Number(text);
+  const at = Date.parse(text);
+  if (Number.isNaN(at)) return null;
+  return Math.max(0, Math.ceil((at - now) / 1000));
+}
+
+// send_feedback failures tell the calling agent the status, a reason code,
+// whether to retry, and one sentence on what to do next.
+function feedbackFailureResult(tool, response, status) {
+  const res = response || {};
+  const retryAfterSeconds = parseRetryAfterSeconds(res.retryAfter);
+  let reason;
+  let retryable;
+  let nextStep;
+  if (status === 401 || status === 403) {
+    reason = 'auth_failed';
+    retryable = false;
+    nextStep = 'Do not retry: ask the user to set a valid FINDTIME_TIME_API_KEY, then call get_api_diagnostics to confirm apiAuthConfigured is true.';
+  } else if (status === 429) {
+    reason = 'rate_limited';
+    retryable = true;
+    nextStep = retryAfterSeconds !== null
+      ? `Wait ${retryAfterSeconds} seconds, then call send_feedback again with the same arguments.`
+      : 'Wait about a minute, then call send_feedback again with the same arguments.';
+  } else if (status !== null && status >= 500) {
+    reason = 'server_error';
+    retryable = true;
+    nextStep = retryAfterSeconds !== null
+      ? `Wait ${retryAfterSeconds} seconds, then call send_feedback again; if it fails again, call get_api_diagnostics.`
+      : 'Retry send_feedback once in a few seconds; if it fails again, call get_api_diagnostics.';
+  } else if (status === null && res.timedOut) {
+    reason = 'timeout';
+    retryable = true;
+    nextStep = 'Retry send_feedback once; if it times out again, call get_api_diagnostics to check apiReachable.';
+  } else if (status === null) {
+    reason = 'network_error';
+    retryable = true;
+    nextStep = 'Call get_api_diagnostics to check apiReachable and the API base URL, then retry send_feedback.';
+  } else {
+    reason = 'request_rejected';
+    retryable = false;
+    nextStep = 'Do not retry with the same arguments: check that tool names a findtime.io MCP tool, then call send_feedback again.';
+  }
+  const statusText = status !== null ? `HTTP ${status}` : (res.networkError || 'no response');
+  const whatWentWrong = `The feedback was not sent: findtime.io did not accept it (${reason}, ${statusText}).`;
+  const structuredContent = {
+    ok: false,
+    sent: false,
+    recorded: false,
+    errorClass: reason,
+    reason,
+    tool,
+    status,
+    retryable,
+    ...(res.retryAfter ? { retryAfter: res.retryAfter } : {}),
+    ...(retryAfterSeconds !== null ? { retryAfterSeconds } : {}),
+    ...(status === null && res.networkError ? { networkError: res.networkError } : {}),
+    whatWentWrong,
+    nextStep,
+    nextAction: {
+      tool: reason === 'auth_failed' || reason === 'network_error' ? 'get_api_diagnostics' : 'send_feedback',
+      hint: nextStep
+    }
+  };
+  return {
+    isError: true,
+    content: [{
+      type: 'text',
+      text: `${whatWentWrong} Retryable: ${retryable ? 'yes' : 'no'}`
+        + `${retryAfterSeconds !== null ? `, after ${retryAfterSeconds} seconds` : ''}. ${nextStep}`
+    }],
+    structuredContent
+  };
+}
+
 function invalidParamsError(message) {
   const error = new Error(message);
   error.code = -32602;
@@ -1463,12 +1541,16 @@ function createFindtimeMcpServer(options = {}) {
       const parsedBody = tryParseJson(rawBody);
 
       if (!response.ok) {
+        const retryAfter = response.headers && typeof response.headers.get === 'function'
+          ? response.headers.get('retry-after')
+          : null;
         return {
           ok: false,
           status: response.status,
           url: url.toString(),
           rawBody,
-          parsedBody
+          parsedBody,
+          ...(retryAfter ? { retryAfter: String(retryAfter) } : {})
         };
       }
 
@@ -1485,6 +1567,7 @@ function createFindtimeMcpServer(options = {}) {
         url: url.toString(),
         rawBody: null,
         parsedBody: undefined,
+        timedOut: Boolean(error && error.name === 'AbortError'),
         networkError: error && error.name === 'AbortError'
           ? `Request timed out after ${timeoutMs}ms`
           : String(error && error.message ? error.message : error)
@@ -1636,32 +1719,39 @@ function createFindtimeMcpServer(options = {}) {
           apiResponse: { status: 400 }
         });
       }
-      const feedbackPayload = {
-        ok: true,
-        recorded: true,
-        errorClass: 'agent_feedback',
-        tool: String(toolArgs.tool || '').trim(),
-        message: 'Feedback sent to findtime.io. Only the tool name was sent; the query text was discarded.'
-      };
+      const tool = String(toolArgs.tool || '').trim();
+      const sentBody = { tool };
       // Only the tool name leaves this process.
       const feedbackResponse = await fetchJson(name, {
         method: 'POST',
         path: '/mcp/feedback',
         params: new URLSearchParams(),
-        body: { tool: feedbackPayload.tool }
-      }, requestMetadata).catch(() => ({ ok: false }));
-      // A missing or rejected API key means the report never reached findtime.io; say so.
-      if (feedbackResponse && (feedbackResponse.status === 401 || feedbackResponse.status === 403)) {
-        return buildActionableErrorResult({
-          toolName: name,
-          args: { tool: feedbackPayload.tool },
-          apiResponse: feedbackResponse
-        });
+        body: sentBody
+      }, requestMetadata).catch((error) => ({
+        ok: false,
+        status: null,
+        networkError: String(error && error.message ? error.message : error)
+      }));
+      const status = Number.isInteger(feedbackResponse && feedbackResponse.status) ? feedbackResponse.status : null;
+      // Only a 2xx from findtime.io counts as sent.
+      if (feedbackResponse && feedbackResponse.ok && status !== null && status >= 200 && status < 300) {
+        const message = `findtime.io received the feedback (HTTP ${status}). Sent exactly ${JSON.stringify(sentBody)}; `
+          + 'the query, whatWasWrong and expectedAnswer stayed local and were not sent.';
+        return {
+          content: [{ type: 'text', text: message }],
+          structuredContent: {
+            ok: true,
+            sent: true,
+            recorded: true,
+            errorClass: 'agent_feedback',
+            status,
+            tool,
+            sentBody,
+            message
+          }
+        };
       }
-      return {
-        content: [{ type: 'text', text: feedbackPayload.message }],
-        structuredContent: feedbackPayload
-      };
+      return feedbackFailureResult(tool, feedbackResponse, status);
     }
 
     if (name === 'get_api_diagnostics') {

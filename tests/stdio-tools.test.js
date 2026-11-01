@@ -262,3 +262,100 @@ test('are_they_awake still accepts theirCities and theirCity', async () => {
     assert.equal(call.url.searchParams.get(Object.keys(args)[0]), 'Bengaluru');
   }
 });
+
+const FEEDBACK_ARGS = { tool: 'convert_time', query: '3pm Paris to London', whatWasWrong: 'wrong offset' };
+
+function feedbackFetch(calls, { status = 201, headers = {}, body = { ok: true }, throws = null } = {}) {
+  return async (url, init) => {
+    calls.push({ url: new URL(url), init });
+    if (throws) throw throws;
+    return {
+      ok: status >= 200 && status < 300,
+      status,
+      headers: { get: (name) => headers[String(name).toLowerCase()] ?? null },
+      async text() { return JSON.stringify(body); }
+    };
+  };
+}
+
+async function sendFeedback(fetchOptions, serverOptions = {}) {
+  const calls = [];
+  const result = await callTool(
+    makeServer(calls, { fetchImpl: feedbackFetch(calls, fetchOptions), ...serverOptions }),
+    'send_feedback',
+    FEEDBACK_ARGS
+  );
+  return { result, calls };
+}
+
+test('send_feedback on a 2xx says exactly what was sent and that findtime received it', async () => {
+  const { result, calls } = await sendFeedback({ status: 201 });
+  assert.equal(result.isError, undefined);
+  const sc = result.structuredContent;
+  assert.equal(sc.ok, true);
+  assert.equal(sc.sent, true);
+  assert.equal(sc.status, 201);
+  assert.deepEqual(sc.sentBody, { tool: 'convert_time' });
+  assert.match(result.content[0].text, /received/);
+  assert.match(result.content[0].text, /\{"tool":"convert_time"\}/);
+  assert.equal(result.content[0].text.includes('Paris'), false);
+  assert.equal(calls.length, 1);
+});
+
+test('send_feedback on 429 is a retryable rate_limited error with Retry-After', async () => {
+  const { result } = await sendFeedback({ status: 429, headers: { 'retry-after': '30' } });
+  assert.equal(result.isError, true);
+  const sc = result.structuredContent;
+  assert.equal(sc.ok, false);
+  assert.equal(sc.sent, false);
+  assert.equal(sc.reason, 'rate_limited');
+  assert.equal(sc.errorClass, 'rate_limited');
+  assert.equal(sc.status, 429);
+  assert.equal(sc.retryable, true);
+  assert.equal(sc.retryAfterSeconds, 30);
+  assert.match(sc.nextStep, /30 seconds/);
+  assert.match(result.content[0].text, /not sent/i);
+});
+
+test('send_feedback on 500 is a retryable server_error', async () => {
+  const { result } = await sendFeedback({ status: 500, body: { error: 'boom' } });
+  assert.equal(result.isError, true);
+  const sc = result.structuredContent;
+  assert.equal(sc.reason, 'server_error');
+  assert.equal(sc.status, 500);
+  assert.equal(sc.retryable, true);
+  assert.equal(sc.retryAfterSeconds, undefined);
+  assert.ok(sc.nextStep);
+});
+
+test('send_feedback on a timeout is a retryable timeout error with no status', async () => {
+  const abort = Object.assign(new Error('The operation was aborted'), { name: 'AbortError' });
+  const { result } = await sendFeedback({ throws: abort });
+  assert.equal(result.isError, true);
+  const sc = result.structuredContent;
+  assert.equal(sc.reason, 'timeout');
+  assert.equal(sc.status, null);
+  assert.equal(sc.retryable, true);
+});
+
+test('send_feedback on a network failure is a retryable network_error', async () => {
+  const { result } = await sendFeedback({ throws: new TypeError('fetch failed') });
+  assert.equal(result.isError, true);
+  const sc = result.structuredContent;
+  assert.equal(sc.reason, 'network_error');
+  assert.equal(sc.status, null);
+  assert.equal(sc.retryable, true);
+});
+
+test('send_feedback on 401 or 403 is auth_failed and not retryable', async () => {
+  for (const status of [401, 403]) {
+    const { result } = await sendFeedback({ status });
+    assert.equal(result.isError, true);
+    const sc = result.structuredContent;
+    assert.equal(sc.errorClass, 'auth_failed');
+    assert.equal(sc.reason, 'auth_failed');
+    assert.equal(sc.status, status);
+    assert.equal(sc.retryable, false);
+    assert.equal(sc.sent, false);
+  }
+});
