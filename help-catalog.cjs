@@ -78,13 +78,49 @@ const HELP_INTENTS = [
   {
     id: 'meeting_time_search',
     label: 'Meeting time search',
-    notes: 'Returns ranked meeting windows and tradeoffs across participants.',
+    notes: 'Returns ranked meeting windows and tradeoffs across participants. Paste shareText. plannerUrl includes up to three UTC aiSlots from engine startUtc, plus legacy aiTime and ref=mcp-bot when opened from MCP.',
     examples: {
       default: ['Find a good meeting time for San Francisco, Berlin, and Sydney.', 'Best meeting time for San Francisco, Berlin, and Sydney next week', 'find the best meeting times between Helsinki and Osaka'],
       slack: ['/findtime find a good meeting time for San Francisco Berlin Sydney'],
       discord: ['best time for Los Angeles, Berlin, and Seoul'],
       chrome: ['meeting Helsinki Dubai Chicago Taipei'],
       mcp: ['Find a good meeting time for San Francisco, Berlin, and Sydney.']
+    }
+  },
+  {
+    id: 'proposed_time_check',
+    label: 'Proposed time check',
+    notes: 'Use check_proposed_time when the user already has a clock time. Paste shareText. Verdicts are ok, early, late, or sleep. plannerUrl uses engine aiSlots and ref=mcp-bot.',
+    examples: {
+      default: ['Tuesday 9am PT with London and Tokyo, is that bad?'],
+      slack: ['/findtime is Tuesday 9am PT bad for London and Tokyo?'],
+      discord: ['is Tuesday 9am PT bad for London and Tokyo?'],
+      chrome: ['Tuesday 9am PT London Tokyo'],
+      mcp: ['Tuesday 9am PT with London and Tokyo, is that bad?']
+    }
+  },
+  {
+    id: 'awake_check',
+    label: 'Are they awake',
+    notes: 'Use are_they_awake for a ping at a specific moment. Labels are work, awake, or sleep. A rough window includes a plannerUrl.',
+    examples: {
+      default: ['It is 3pm for me. Can I ping Bangalore?'],
+      slack: ['/findtime can I ping Bangalore at 3pm PT?'],
+      discord: ['can I ping Bangalore at 3pm PT?'],
+      chrome: ['3pm PT Bangalore'],
+      mcp: ['It is 3pm for me. Can I ping Bangalore?']
+    }
+  },
+  {
+    id: 'recurring_slot_pain',
+    label: 'Recurring slot pain',
+    notes: 'Use rank_recurring_slot for a weekly wall time. The result includes per-city pain, a daylight-saving week when one exists, a kinder slot, shareText, and plannerUrl.',
+    examples: {
+      default: ['Monday 9am PT standup for San Francisco, London, and Bangalore.'],
+      slack: ['/findtime who does Monday 9am PT punish in London and Bangalore?'],
+      discord: ['who does Monday 9am PT punish in London and Bangalore?'],
+      chrome: ['Monday 9am PT SF London Bangalore'],
+      mcp: ['Monday 9am PT standup for San Francisco, London, and Bangalore.']
     }
   },
   {

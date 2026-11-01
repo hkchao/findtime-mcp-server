@@ -54,7 +54,7 @@ Release source of truth:
 
 - Publish only from the public package repo, `https://github.com/hkchao/findtime-mcp-server`, from a release tag `v<version>`.
 - In `world-time-ai`, the package implementation lives under `services/mcp-server`. Sync changes into the public repo first; never publish from `world-time-ai`.
-- The package includes `server.js`, `help-catalog.cjs`, `README.md`, `SKILL.md`, `LICENSE`, and `examples`.
+- The package includes `server.js`, `actionable-errors.cjs`, `attribution.cjs`, `miss-log.cjs`, `help-catalog.cjs`, `README.md`, `SKILL.md`, `LICENSE`, and `examples`. It never includes `booking-tools.cjs`: booking tools are hosted-only.
 - `package.json` `version`, `server.json` `version`, and the npm entry's `version` in `server.json` `packages` must all match. `npm run release:check` and the registry workflow both fail when they don't.
 
 Normal release (CI, the default path):
@@ -74,6 +74,7 @@ git push origin v<version>
 
 CI settings the release depends on (names only; never paste a secret value into chat, a commit, or a log):
 
+- There are no npm tokens. Publishing is trusted publishing only: `@findtime/mcp-server` disallows token publishing and every npm token was deleted on Nov 1, 2026, so the `NPM_TOKEN` fallback below can't publish. Dispatch manual runs from the GitHub Actions UI; the `gh` PAT gets a 403 on workflow dispatch.
 - npm trusted publisher on `@findtime/mcp-server` (npmjs.com, package Settings, Trusted Publisher): GitHub Actions, organization or user `hkchao`, repository `findtime-mcp-server`, workflow filename `publish.yml`, no environment, direct `npm publish` allowed. A new trusted publisher must complete its first successful publish within 2 days or it expires.
 - `package.json` `repository.url` must stay `git+https://github.com/hkchao/findtime-mcp-server.git`. npm rejects trusted publishes from a repo that doesn't match it.
 - `publish.yml` needs `permissions: id-token: write`, Node 24 and npm 11.5.1 or later. The job fails early if npm is older.
@@ -298,16 +299,35 @@ Use specific tools when the agent has already parsed the task into structured in
 - `convert_time`: convert a known date/time from one place or timezone to another
 - `get_dst_schedule`: DST status and transition dates
 - `get_overlap_hours`: working-hours overlap between places or timezones
-- `find_meeting_time`: ranked meeting slots across multiple participants or locations
+- `find_meeting_time`: ranked meeting slots across multiple participants or locations. Paste `shareText`. The planner link includes `aiSlots`, legacy `aiTime`, and `ref=mcp-bot`.
+- `check_proposed_time`: verdict for a clock time the user already picked. Paste `shareText`. If `context` is set, tell the user that sentence. It says whether daylight saving skipped the local time or made it happen twice.
+- `are_they_awake`: work, awake, or sleep for other cities at one moment. Paste `shareText`.
+- `rank_recurring_slot`: who a weekly wall time punishes, plus a kinder slot. Paste `shareText`. If a week has `context`, tell the user that sentence. It says whether daylight saving skipped that local time or made it happen twice.
+- `save_team`, `get_team`, `list_teams`, `rename_team`, `delete_team` (hosted connector only): the homepage planner Saved groups for the same Google account. Call `list_teams` and pass that exact name as `teamId` when the call has no locations. `Marketing` and `marketing` are two groups. Add or remove a city with `save_team` and the full city list. A city may be a plain name or `City|IANA`. `save_team`, `rename_team` and `delete_team` need `meetings:plan`. `list_teams` and `get_team` need `time:read`. A deleted group stays deleted. The npm package has no team tools, and a `teamId` sent with an API key gets `teams_not_persisted`. Pass locations inline in that case.
+- `send_feedback`: report a wrong, incomplete, or unhelpful findtime.io answer with `tool`, `query`, and `whatWasWrong`. The query text is discarded; only the tool name and error class are kept.
 - `search_timezones`: search, resolve, or disambiguate locations and timezone abbreviations
 - `time_snapshot`: richer present-moment context for a place or timezone
 - `get_location_by_id`: hydrate a known location ID returned by another `findtime.io` MCP response
+
+### Hosted connector: meetings and booking
+
+The hosted connector at `https://mcp.findtime.io/mcp` (Streamable HTTP, Google sign-in over OAuth) has every tool above plus saved groups and booking. The npm package (stdio, API key) has neither: both need a signed-in Google account, and an API key never gets booking tools.
+
+- Scopes: a client that names no scope gets `time:read meetings:plan`. It asks for `booking:request` or `booking:host` by name. A call without the scope it needs answers 403 `insufficient_scope` with the scopes to ask for on the next sign-in.
+- Meeting planning: `find_meeting_time` and `get_overlap_hours` need `meetings:plan`. `check_proposed_time`, `are_they_awake` and `rank_recurring_slot` need `time:read`.
+- Saved groups: `list_teams` and `get_team` need `time:read`. `save_team`, `rename_team` and `delete_team` need `meetings:plan`. Pass a group's exact name as `teamId` to the meeting tools when the call has no locations.
+- Guest booking: `get_host_booking_profile`, `find_host_slots`, `get_booking_status`, `list_my_booking_requests` and `cancel_booking` need `time:read`; status, history and cancel also take the guest's tracking or history token. `request_booking` and `reschedule_booking` need `booking:request`.
+- Host booking, all `booking:host`: `get_my_booking_page`, `update_booking_page`, `list_booking_requests`, `approve_booking_request`, `decline_booking_request`, `cancel_booking_as_host`, `create_invite_link` and `revoke_invite_link`. They act only on the signed-in host's own page.
+- Every booking write is two steps. The first call, without `confirm`, returns a read-back and changes nothing. Show it, wait for the person's yes, then call again with the same arguments and `confirm: true`.
+- An agent never confirms a meeting. The host approves or declines every request.
+- Docs: `https://findtime.io/developers/mcp/#booking-tools` (tools and setup) and `https://findtime.io/developers/#booking-api` (the booking routes these tools call).
 
 ## Answering Rules
 
 When using `findtime.io` MCP:
 
 - Treat IANA timezone IDs as canonical timezone identifiers.
+- Say the modern city name. Bangalore returns Bengaluru, Bombay returns Mumbai, Peking returns Beijing, Saigon returns Ho Chi Minh City, Kiev returns Kyiv, and Madras returns Chennai. Calcutta returns Kolkata. Madras, Oregon returns the town in Oregon.
 - Treat timezone abbreviations such as `CST`, `IST`, `PST`, and `EST` as ambiguous unless the tool response resolves them confidently.
 - Preserve explicit ambiguity or clarification messages from the tool instead of guessing.
 - Preserve weekday, date, time, timezone abbreviation, and UTC offset fields exactly as returned by the tool. Do not recompute, shift, or "correct" day names during natural-language synthesis.

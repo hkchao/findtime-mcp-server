@@ -12,7 +12,7 @@ Published surfaces:
 - GitHub: `https://github.com/hkchao/findtime-mcp-server`
 - Official MCP Registry: `https://registry.modelcontextprotocol.io/?q=io.github.hkchao%2Ffindtime-mcp-server`
 - MCP Registry name: `io.github.hkchao/findtime-mcp-server`
-- Hosted server: `https://mcp.findtime.io/mcp` (Streamable HTTP, OAuth sign-in). It includes the time tools and saved teams. Booking tools (request, reschedule and cancel bookings; host approve/decline; booking pages and invite links) are available after you sign in with Google through the connector and grant the booking scopes. See [Hosted server scopes](#hosted-server-scopes) for which OAuth scope covers which tool. The npm package covers the time tools only and needs `FINDTIME_TIME_API_KEY`.
+- Hosted server: `https://mcp.findtime.io/mcp` (Streamable HTTP, OAuth sign-in). It includes the time tools and saved teams. Booking tools (request, reschedule and cancel bookings; host approve/decline; booking pages and invite links) are available after you sign in with Google through the connector and grant the booking scopes. See [Hosted server scopes](#hosted-server-scopes) for which OAuth scope covers which tool. The npm package covers the time and meeting-planning tools only and needs `FINDTIME_TIME_API_KEY`. It has no saved-group or booking tools: those need a findtime account signed in with Google on the hosted server, and an API key never gets booking tools.
 
 ## Hosted server scopes
 
@@ -22,7 +22,7 @@ When a signed-in client calls a booking tool without the scope it needs, the ser
 
 | Scope | Tools |
 | --- | --- |
-| `time:read` | All time tools not listed below, plus `get_team`, `list_teams`, the booking reads `get_host_booking_profile`, `find_host_slots`, `get_booking_status`, `list_my_booking_requests`, and `cancel_booking` (a guest cancelling their own request; it needs the tracking or history token returned when the request was sent) |
+| `time:read` | All time tools not listed below (including `check_proposed_time`, `are_they_awake`, `rank_recurring_slot`, and `send_feedback`), plus `get_team`, `list_teams`, the booking reads `get_host_booking_profile`, `find_host_slots`, `get_booking_status`, `list_my_booking_requests`, and `cancel_booking` (a guest cancelling their own request; it needs the tracking or history token returned when the request was sent) |
 | `meetings:plan` | `find_meeting_time`, `get_overlap_hours`, `save_team`, `rename_team`, `delete_team` |
 | `booking:request` | `request_booking`, `reschedule_booking` |
 | `booking:host` | `get_my_booking_page`, `list_booking_requests`, `approve_booking_request`, `decline_booking_request`, `cancel_booking_as_host`, `update_booking_page`, `create_invite_link`, `revoke_invite_link` |
@@ -31,16 +31,30 @@ The findtime booking API checks `booking:request` and `booking:host` again on it
 
 ## Tool surface
 
+The npm package (stdio, API key) and the hosted server both have:
+
 - `answer_time_question`
 - `get_findtime_help`
+- `get_api_diagnostics`
+- `send_feedback` (reports a wrong answer; sends the tool name, never the query text)
 - `time_snapshot`
 - `get_current_time`
 - `get_dst_schedule`
 - `convert_time`
 - `get_overlap_hours`
 - `find_meeting_time`
+- `check_proposed_time` (`/meeting/check`: verdicts for a time the user already picked)
+- `are_they_awake` (`/meeting/awake`: work, awake, or sleep in other cities at one moment)
+- `rank_recurring_slot` (`/meeting/recurring`: who a weekly time punishes, plus a kinder slot)
 - `search_timezones`
 - `get_location_by_id`
+
+Hosted server only (`https://mcp.findtime.io/mcp`, signed in with Google). These are not in the npm package and never will be on an API key:
+
+- Saved groups: `save_team`, `get_team`, `list_teams`, `rename_team`, `delete_team`. They read and write the homepage planner Saved groups of the signed-in Google account. On the npm package, a `teamId` without locations answers `teams_not_persisted`; pass locations on each call.
+- Booking: `get_host_booking_profile`, `find_host_slots`, `request_booking`, `get_booking_status`, `list_my_booking_requests`, `cancel_booking`, `reschedule_booking`, `get_my_booking_page`, `list_booking_requests`, `approve_booking_request`, `decline_booking_request`, `cancel_booking_as_host`, `update_booking_page`, `create_invite_link`, `revoke_invite_link`. Every booking write returns a read-back first and changes nothing until it is called again with `confirm: true`; the host approves or declines every request.
+
+Scopes for each hosted tool are in [Hosted server scopes](#hosted-server-scopes). Tool and setup docs: https://findtime.io/developers/mcp/#booking-tools. The booking routes these tools call: https://findtime.io/developers/#booking-api.
 
 Prefer `answer_time_question` for messy natural-language prompts such as "3pm PST to London", "what is the IANA timezone for San Francisco?", "working hours overlap for SF, Berlin, and Tokyo", or "what does CST mean?". The tool classifies the prompt through findtime.io's domain logic, dispatches to deterministic Time API behavior, and returns structured ambiguity or clarification when the world is genuinely ambiguous.
 
@@ -298,13 +312,22 @@ The npm package `@findtime/mcp-server` and GitHub repository
 `hkchao/findtime-mcp-server` are the findtime.io MCP distribution channels.
 Product documentation: https://findtime.io/developers/mcp/
 
-All tools query time information, suggest meeting times, or return help and
-diagnostics; they do not book meetings or modify calendars. They declare
-`readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true`, and
-`openWorldHint: true`. Read-only describes the user-facing operation, not an
-absence of network traffic: API requests, diagnostics, and optional usage
+The npm package's tools query time information, suggest meeting times, or
+return help and diagnostics; they do not book meetings or modify calendars.
+They declare `readOnlyHint: true`, `destructiveHint: false`,
+`idempotentHint: true`, and `openWorldHint: true`, except `send_feedback`, which
+records a report and declares `readOnlyHint: false`, `destructiveHint: false`,
+and `idempotentHint: false`. Read-only describes the user-facing operation, not
+an absence of network traffic: API requests, diagnostics, and optional usage
 telemetry contact external services. Repeating a current-time query can return a
 new time; idempotent describes the absence of additional domain mutations.
+
+The hosted server at `https://mcp.findtime.io/mcp` also has booking tools that
+do write: requesting, rescheduling, approving, declining, and cancelling
+bookings, changing a booking page, and making or revoking invite links.
+Approving or cancelling a meeting changes the host's Google Calendar. Those
+tools declare `readOnlyHint: false`, and the ones that cancel, decline, or
+revoke declare `destructiveHint: true`. They are not part of this package.
 
 API-key environment variables are alternative configuration names for one key,
 not four separate credentials.
@@ -324,6 +347,15 @@ The hosted Time API owns API-key validation, configured per-key rate limits,
 and quotas. The wrapper forwards upstream failures, including HTTP 429, as MCP
 tool errors. It does not expose a public HTTP listener or implement a separate
 local rate limiter. Help is local; diagnostics also reads npm version metadata.
+
+Miss reports: when a tool call fails, a location can't be resolved, or the
+same client quickly re-asks, the
+wrapper posts a miss event to the configured Time API (`/mcp/miss`) with the
+tool name, an error class, result flags, a candidate count, the installation
+identifier, and the client and traffic type. `send_feedback` posts the tool
+name and the same metadata to `/mcp/feedback`. Neither sends query text,
+`whatWasWrong`, or the API key in the body; the key goes only in the
+`Authorization` header, as for every Time API call.
 
 Optional usage telemetry goes to `https://slack.findtime.io/telemetry/usage` by
 default. The wrapper sends tool name, outcome, query-text length, a persistent

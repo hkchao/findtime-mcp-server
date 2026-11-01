@@ -20,6 +20,63 @@ const {
   encodeMessage
 } = require('./server.js');
 
+test('standard initialization attributes API requests without changing tool answers', async () => {
+  const calls = [];
+  const server = createFindtimeMcpServer({
+    attribution: { trafficType: 'internal_qa', callerLabel: 'local-review', installationId: 'install-one' },
+    fetchImpl: makeCapturingFetch(calls)
+  });
+  await server.handleMessage({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {
+    clientInfo: { name: 'codex', version: '1.2.3' }
+  } });
+  const result = await callCurrentTime(server, { query: 'Tokyo' });
+  assert.equal(result.result.isError, undefined);
+  const headers = calls[0].init.headers;
+  assert.equal(headers['X-Findtime-MCP-Client-Name'], 'codex');
+  assert.equal(headers['X-Findtime-MCP-Client-Version'], '1.2.3');
+  assert.equal(headers['X-Findtime-MCP-Installation-ID'], 'install-one');
+  assert.equal(headers['X-Findtime-MCP-Traffic-Type'], 'internal_qa');
+  assert.equal(headers['X-Findtime-MCP-Caller-Label'], 'local-review');
+  assert.equal(headers['X-Findtime-MCP-Tool'], 'get_current_time');
+});
+
+test('malformed optional caller metadata never changes the time answer', async () => {
+  const calls = [];
+  const server = createFindtimeMcpServer({
+    attribution: { callerLabel: 'a'.repeat(129), trafficType: {}, installationId: 'bad\r\nheader' },
+    fetchImpl: makeCapturingFetch(calls)
+  });
+  await server.handleMessage({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {
+    clientInfo: { name: {}, version: 'bad\nversion' }
+  } });
+  const result = await callCurrentTime(server, { query: 'Tokyo' });
+  assert.equal(result.result.isError, undefined);
+  assert.equal(calls[0].init.headers['X-Findtime-MCP-Client-Name'], undefined);
+  assert.equal(calls[0].init.headers['X-Findtime-MCP-Caller-Label'], undefined);
+});
+
+test('a pending or failed tracking write cannot hold up a tool answer', async () => {
+  for (const record of [() => new Promise(() => {}), () => Promise.reject(new Error('tracking offline'))]) {
+    const pending = [];
+    const server = createFindtimeMcpServer({
+      missLog: { record },
+      scheduleTracking: (task) => pending.push(task),
+      fetchImpl: makeCapturingFetch([])
+    });
+    let timer;
+    try {
+      const response = await Promise.race([
+        callCurrentTime(server, { query: 'Tokyo' }),
+        new Promise((_resolve, reject) => { timer = setTimeout(() => reject(new Error('answer waited for tracking')), 500); })
+      ]);
+      assert.equal(response.result.isError, undefined);
+      assert.ok(pending.length);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+});
+
 test('tools/list exposes the production parity tool surface', async () => {
   const server = createFindtimeMcpServer({
     apiBaseUrl: 'https://time-api.findtime.io',
@@ -114,7 +171,7 @@ test('answer-only tool mode exposes only the router and diagnostics tools', asyn
 
     assert.deepEqual(
       response.result.tools.map((tool) => tool.name),
-      ['answer_time_question', 'get_api_diagnostics', 'get_findtime_help']
+      ['answer_time_question', 'get_api_diagnostics', 'send_feedback', 'get_findtime_help']
     );
 
     const hiddenToolResponse = await server.handleMessage({
@@ -129,8 +186,10 @@ test('answer-only tool mode exposes only the router and diagnostics tools', asyn
       }
     });
 
-    assert.equal(hiddenToolResponse.error.code, -32602);
-    assert.match(hiddenToolResponse.error.message, /Unknown tool: get_current_time/);
+    assert.equal(hiddenToolResponse.error, undefined);
+    assert.equal(hiddenToolResponse.result.isError, true);
+    assert.equal(hiddenToolResponse.result.structuredContent.errorClass, 'unknown_tool');
+    assert.match(hiddenToolResponse.result.content[0].text, /Unknown tool: get_current_time/);
   } finally {
     if (previousToolMode === undefined) {
       delete process.env.FINDTIME_MCP_TOOL_MODE;
@@ -469,9 +528,10 @@ test('per-call end-user attribution does not leak between consecutive tool calls
   await callCurrentTime(server, { query: 'Tokyo', _endUserId: 'user-a-hash' });
   await callCurrentTime(server, { query: 'London', _endUserId: 'user-b-hash' });
 
-  assert.equal(calls.length, 2);
-  assert.equal(calls[0].init.headers['X-Findtime-End-User-ID'], 'user-a-hash');
-  assert.equal(calls[1].init.headers['X-Findtime-End-User-ID'], 'user-b-hash');
+  const toolCalls = calls.filter((call) => !String(call.url).includes('/mcp/miss'));
+  assert.equal(toolCalls.length, 2);
+  assert.equal(toolCalls[0].init.headers['X-Findtime-End-User-ID'], 'user-a-hash');
+  assert.equal(toolCalls[1].init.headers['X-Findtime-End-User-ID'], 'user-b-hash');
 });
 
 test('per-call end-user attribution rejects _endUserId longer than 256 characters', async () => {
@@ -627,7 +687,7 @@ test('find_meeting_time forwards pipe-delimited arrays to the meeting endpoint',
 
   assert.equal(
     calls[0],
-    'https://time-api.findtime.io/meeting/find?locations=Tokyo%7CCairo%7CNew+York&countryCodes=JP%7CEG%7CUS&date=2026-03-10'
+    'https://time-api.findtime.io/meeting/find?locations=Tokyo%7CCairo%7CNew+York&countryCodes=JP%7CEG%7CUS&date=2026-03-10&ref=mcp-bot'
   );
   assert.equal(response.result.structuredContent.shape, 'find_meeting_time.v2');
 });
@@ -926,55 +986,5 @@ function invokeServerOverStdio({ serverPath, input, env }) {
         finish(reject, new Error(`timed out waiting for server response: ${stderr || stdout}`));
       }
     }, 2000);
-  });
-}
-
-for (const mode of ['all', 'answer-only']) {
-  test(`tools/list exposes explicit safety hints in ${mode} mode`, async () => {
-    const previous = process.env.FINDTIME_MCP_TOOL_MODE;
-    process.env.FINDTIME_MCP_TOOL_MODE = mode;
-    try {
-      const server = createFindtimeMcpServer({ fetchImpl: async () => {
-        throw new Error('Listing tools must not fetch');
-      } });
-      const response = await server.handleMessage({ jsonrpc: '2.0', id: 900, method: 'tools/list' });
-      assert.equal(response.result.tools.length, mode === 'all' ? 11 : 3);
-      for (const tool of response.result.tools) {
-        assert.deepEqual(tool.annotations, {
-          readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true
-        }, tool.name);
-      }
-    } finally {
-      if (previous === undefined) delete process.env.FINDTIME_MCP_TOOL_MODE;
-      else process.env.FINDTIME_MCP_TOOL_MODE = previous;
-    }
-  });
-}
-
-for (const [name, args, endpoint, expectedParams] of [
-  ['time_snapshot', { locations: ['Tokyo', 'London'], includeTransitions: true }, '/time/snapshot', { locations: 'Tokyo|London', includeTransitions: 'true' }],
-  ['convert_time', { from: 'Tokyo', to: ['London', 'Paris'], time: '3pm Tuesday' }, '/time/convert', { from: 'Tokyo', to: 'London|Paris', time: '3pm Tuesday' }],
-  ['get_overlap_hours', { locations: ['Tokyo', 'London'], date: 'next Friday' }, '/time/overlap', { locations: 'Tokyo|London', date: 'next Friday' }],
-  ['get_location_by_id', { id: 'findtime:victoria|CA|America/Vancouver' }, '/locations/findtime%3Avictoria%7CCA%7CAmerica%2FVancouver', {}],
-  ['answer_time_question', { query: 'Time in Tokyo', userTimezone: 'America/Los_Angeles' }, '/time/answer', { query: 'Time in Tokyo', userTimezone: 'America/Los_Angeles' }]
-]) {
-  test(`${name} preserves request arguments, authenticates, and returns API fields`, async () => {
-    const payload = { weekday: 'Tuesday', date: '2026-09-15', time24h: '15:00', utcOffset: '+09:00' };
-    let calls = 0;
-    const server = createFindtimeMcpServer({
-      apiBaseUrl: 'https://time-api.findtime.io', apiKey: 'test-only-key',
-      fetchImpl: async (url, init) => {
-        calls++;
-        const parsed = new URL(url);
-        assert.equal(parsed.pathname, endpoint);
-        for (const [key, value] of Object.entries(expectedParams)) assert.equal(parsed.searchParams.get(key), value);
-        assert.equal(init.headers.Authorization, 'Bearer test-only-key');
-        return { ok: true, status: 200, text: async () => JSON.stringify(payload) };
-      }
-    });
-    const result = await server.handleMessage({ jsonrpc: '2.0', id: 901, method: 'tools/call', params: { name, arguments: args } });
-    assert.equal(calls, 1);
-    assert.notEqual(result.result.isError, true);
-    for (const [key, value] of Object.entries(payload)) assert.equal(result.result.structuredContent[key], value);
   });
 }

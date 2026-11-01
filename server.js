@@ -3,12 +3,13 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const crypto = require('node:crypto');
+const { installationId: getMcpClientId, localAttribution, normalizeAttribution, attributionHeaders } = require('./attribution.cjs');
 
 const PACKAGE_ROOT = __dirname;
 const LOCAL_PACKAGE_PATH = path.join(PACKAGE_ROOT, 'package.json');
 const REPO_ROOT = path.resolve(PACKAGE_ROOT, '..', '..');
 const REPO_PACKAGE_PATH = path.join(REPO_ROOT, 'package.json');
-const DEFAULT_PROTOCOL_VERSION = '2024-11-05';
+const DEFAULT_PROTOCOL_VERSION = '2025-11-25';
 const END_USER_ID_ARGUMENT = '_endUserId';
 const END_USER_ID_HEADER = 'X-Findtime-End-User-ID';
 const END_USER_ID_MAX_LENGTH = 256;
@@ -20,7 +21,6 @@ const SUPPORTED_PROTOCOL_VERSIONS = new Set([
   '2024-11-05',
   '2025-03-26',
   '2025-06-18',
-  '2025-11-05',
   '2025-11-25'
 ]);
 
@@ -68,13 +68,29 @@ const DEFAULT_BINDING_HEADER = firstNonEmpty(
   process.env.FINDTIME_MCP_BINDING_HEADER
 ) || '';
 const TIMEZONE_HELPERS_PATH = path.join(REPO_ROOT, 'slack-bot', 'timezone-helpers.js');
-const ANSWER_ONLY_TOOL_NAMES = new Set(['answer_time_question', 'get_findtime_help', 'get_api_diagnostics']);
+const ANSWER_ONLY_TOOL_NAMES = new Set([
+  'answer_time_question',
+  'get_findtime_help',
+  'get_api_diagnostics',
+  'send_feedback'
+]);
+const {
+  buildActionableErrorResult,
+  enrichResolvedPayload
+} = require('./actionable-errors.cjs');
+const {
+  createMemoryMissLog,
+  hashClientId,
+  isDroppedMissTraffic,
+  toRemoteMissEvent
+} = require('./miss-log.cjs');
+const MISS_ADMIN_KEY_ENV = 'TIME_API_MCP_MISS_ADMIN_KEY';
 
 const TOOL_DEFINITIONS = [
   {
     name: 'answer_time_question',
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-    description: 'PREFERRED entry point for vague, messy, or mixed time/timezone/scheduling questions. findtime.io classifies intent and dispatches internally. Use this when the user gives a raw natural-language prompt with a day or date qualifier, such as "Tuesday", "next Friday", "tomorrow", "tonight", "this weekend", "in 3 weeks", or "last Monday". If you already have structured arguments, the narrower tools can accept explicit ISO dates and simple human day/date values in their date fields where documented.',
+    description: 'PREFERRED entry point for vague, messy, or mixed time/timezone/scheduling questions. findtime.io classifies intent and dispatches internally. Use this when the user gives a raw natural-language prompt with a day or date qualifier, such as "Tuesday", "next Friday", "tomorrow", "tonight", "this weekend", "in 3 weeks", or "last Monday". Do not use this to dump structured from/to/time fields; call convert_time, get_current_time, or find_meeting_time when those arguments are already known. If a city is unknown or ambiguous, read candidates and call search_timezones rather than guessing.',
     inputSchema: {
       type: 'object',
       required: ['query'],
@@ -116,7 +132,7 @@ const TOOL_DEFINITIONS = [
   {
     name: 'get_api_diagnostics',
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-    description: 'Return MCP and findtime Time API diagnostics, including the running MCP version, latest published MCP version, API base URL, auth configuration, and a live health check.',
+    description: 'Return MCP and findtime Time API diagnostics: running MCP version, latest published version, API base URL, auth configuration, and live health. If TIME_API_MCP_MISS_ADMIN_KEY is configured, also include aggregate miss-log counts (no query text). Call this after auth or connectivity failures. It does not answer time questions.',
     inputSchema: {
       type: 'object',
       properties: {},
@@ -124,6 +140,37 @@ const TOOL_DEFINITIONS = [
     },
     buildRequest() {
       return { path: '/health', params: new URLSearchParams() };
+    }
+  },
+  {
+    name: 'send_feedback',
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+    description: 'Report a wrong, incomplete, or unhelpful findtime.io MCP answer. Call this after a tool result that you or the user judged incorrect. Required: tool, query, and whatWasWrong. Optional: expectedAnswer. Query text is used only to classify the report and is discarded; the miss log stores tool, error class, flags, and counts — not the query, expected answer, or any free text. Never send names, emails, phone numbers, IP addresses, or raw user ids.',
+    inputSchema: {
+      type: 'object',
+      required: ['tool', 'query', 'whatWasWrong'],
+      properties: {
+        tool: {
+          type: 'string',
+          description: 'MCP tool that produced the unhelpful result, such as answer_time_question, convert_time, or get_current_time.'
+        },
+        query: {
+          type: 'string',
+          description: 'Original time query or lookup text. Strip names, emails, and other personal data first.'
+        },
+        whatWasWrong: {
+          type: 'string',
+          description: 'Short description of the mistake or why the answer was unhelpful.'
+        },
+        expectedAnswer: {
+          type: 'string',
+          description: 'Optional correct time, timezone, or location the tool should have returned.'
+        }
+      },
+      additionalProperties: false
+    },
+    buildRequest() {
+      return { path: '/mcp/feedback', params: new URLSearchParams() };
     }
   },
   {
@@ -181,7 +228,7 @@ const TOOL_DEFINITIONS = [
   {
     name: 'get_current_time',
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-    description: 'Return the production current time payload for a single city, query, or timezone. Exact country-name queries may be retried through a canonical city when the resolver can do so deterministically. For relative-date inputs ("Tuesday", "next Friday", "tomorrow", "tonight"), route to answer_time_question, which resolves the relative date and dispatches internally.',
+    description: 'Return the production current time payload for a single already-identified city, query, or IANA timezone. Do not use this for conversions, overlaps, or meeting search. If the city is unknown or could be more than one place, call search_timezones and retry with suggestedQuery or countryCode; do not guess. Exact country-name queries may be retried through a canonical city when the resolver can do so deterministically. For relative-date inputs ("Tuesday", "next Friday", "tomorrow", "tonight"), route to answer_time_question.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -200,6 +247,17 @@ const TOOL_DEFINITIONS = [
         countryCode: {
           type: 'string',
           description: 'Optional ISO country hint for ambiguous city names.'
+        },
+        candidateLimit: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 50,
+          description: 'Page size for namesake candidates. Default 6. Follow moreCandidates.resolve or moreCandidates.search for the rest.'
+        },
+        candidateOffset: {
+          type: 'integer',
+          minimum: 0,
+          description: 'Skip this many namesake candidates. Copy from moreCandidates.candidateOffset.'
         }
       },
       additionalProperties: false
@@ -211,6 +269,8 @@ const TOOL_DEFINITIONS = [
       setParam(params, 'query', args.query);
       setParam(params, 'timezone', args.timezone);
       setParam(params, 'countryCode', args.countryCode);
+      setParam(params, 'candidateLimit', args.candidateLimit);
+      setParam(params, 'candidateOffset', args.candidateOffset);
       return { path: '/time/current', params };
     }
   },
@@ -263,7 +323,7 @@ const TOOL_DEFINITIONS = [
   {
     name: 'convert_time',
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-    description: 'Convert a source local time into one or more target locations using the production conversion endpoint. Use when you have structured source, target, and time arguments. date may be an explicit ISO calendar date (YYYY-MM-DD), or time may include a simple human date phrase such as "3pm Tuesday", "3pm thur", "3pm tomorrow", or "3pm next Friday"; findtime.io resolves that date relative to the source timezone. Route vague or mixed-intent raw prompts to answer_time_question. When presenting results, copy localTime.weekday, localTime.date, localTime.time12h/time24h, timezone abbreviation, and UTC offset exactly from the tool output; do not recompute or shift day names during synthesis.',
+    description: 'Convert a source timezone local time into one or more target locations. Requires structured from, to, and time. Do not pass a whole sentence as from or to; use answer_time_question for vague prompts. If a city is unknown or ambiguous, call search_timezones and retry with a candidate suggestedQuery or countryCode instead of guessing. date may be ISO YYYY-MM-DD, or time may include a simple human date phrase such as "3pm Tuesday". When presenting results, copy localTime.weekday, localTime.date, localTime.time12h/time24h, timezone abbreviation, and UTC offset exactly from the tool output; do not recompute or shift day names during synthesis. Route vague or mixed-intent raw prompts to answer_time_question.',
     inputSchema: {
       type: 'object',
       required: ['from', 'to', 'time'],
@@ -338,10 +398,9 @@ const TOOL_DEFINITIONS = [
   {
     name: 'find_meeting_time',
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-    description: 'Return ranked meeting suggestions from the production meeting search endpoint. Use when you have structured locations and, optionally, a date. date may be ISO YYYY-MM-DD or a simple human day/date value such as "Thursday", "tomorrow", or "next Friday"; findtime.io resolves it relative to the first location timezone. Route vague or mixed-intent raw prompts to answer_time_question.',
+    description: 'Return ranked meeting suggestions from the production meeting search endpoint. Use when you have structured locations and, optionally, a date. date may be ISO YYYY-MM-DD or a simple human day/date value such as "Thursday", "tomorrow", or "next Friday"; findtime.io resolves it relative to the first location timezone. Paste shareText to the user. plannerUrl carries aiCities, up to three UTC aiSlots, legacy aiTime, and ref=mcp-bot. Do not invent wall-clock times. Route vague or mixed-intent raw prompts to answer_time_question.',
     inputSchema: {
       type: 'object',
-      required: ['locations'],
       properties: {
         locations: stringOrStringArraySchema(
           'Two or more locations. Arrays are joined with "|" before calling the API.'
@@ -352,23 +411,152 @@ const TOOL_DEFINITIONS = [
         date: {
           type: 'string',
           description: 'Optional date to anchor the meeting search. Prefer ISO YYYY-MM-DD, but simple human values such as "Thursday", "tomorrow", or "next Friday" are accepted.'
+        },
+        durationMinutes: {
+          type: 'integer',
+          description: 'Optional meeting length. Only 30, 45, or 60 are written onto the planner link as aiDuration.'
         }
       },
       additionalProperties: false
     },
     buildRequest(args) {
-      ensureRequired(args, ['locations'], 'find_meeting_time requires locations.');
+      if (!hasLocations(args)) {
+        throw invalidParamsError('find_meeting_time requires locations.');
+      }
       const params = new URLSearchParams();
       setParam(params, 'locations', args.locations, { joinArraysWith: '|' });
       setParam(params, 'countryCodes', args.countryCodes, { joinArraysWith: '|' });
       setParam(params, 'date', args.date);
+      setParam(params, 'durationMinutes', args.durationMinutes);
+      setParam(params, 'ref', 'mcp-bot');
       return { path: '/meeting/find', params };
+    }
+  },
+  {
+    name: 'check_proposed_time',
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    description: 'Judge a proposed meeting instant for each city. Use when the user already has a clock time, such as "Tuesday 9am PT with London and Tokyo — is that bad?". Pass start as an ISO instant, or as a floating local time with home set to an IANA timezone. Paste shareText. Time API computes the UTC instant, local lines, verdicts, and up to three better aiSlots. Do not invent wall-clock times. If context is set, tell the user that sentence. It says whether daylight saving skipped the local time or made it happen twice.',
+    inputSchema: {
+      type: 'object',
+      required: ['start'],
+      properties: {
+        locations: stringOrStringArraySchema('Two or more cities or timezones.'),
+        countryCodes: stringOrStringArraySchema('Optional ISO country hints aligned to locations.'),
+        start: {
+          type: 'string',
+          description: 'ISO instant with a UTC offset, or a floating local time such as 2026-09-29T09:00 or 9:00am.'
+        },
+        home: {
+          type: 'string',
+          description: 'IANA timezone for a floating start, such as America/Los_Angeles.'
+        },
+        date: {
+          type: 'string',
+          description: 'YYYY-MM-DD when start is only a clock time.'
+        },
+        durationMinutes: { type: 'integer', description: 'Optional. Only 30, 45, or 60 are written onto the planner link.' },
+        workStart: { type: 'integer', description: 'First in-hours local hour. Default 9.' },
+        workEnd: { type: 'integer', description: 'Last in-hours local hour, inclusive. Default 18.' }
+      },
+      additionalProperties: false
+    },
+    buildRequest(args) {
+      ensureRequired(args, ['start'], 'check_proposed_time requires start.');
+      if (!hasLocations(args)) {
+        throw invalidParamsError('check_proposed_time requires locations.');
+      }
+      const params = new URLSearchParams();
+      setParam(params, 'locations', args.locations, { joinArraysWith: '|' });
+      setParam(params, 'countryCodes', args.countryCodes, { joinArraysWith: '|' });
+      setParam(params, 'start', args.start);
+      setParam(params, 'home', args.home);
+      setParam(params, 'date', args.date);
+      setParam(params, 'durationMinutes', args.durationMinutes);
+      setParam(params, 'workStart', args.workStart);
+      setParam(params, 'workEnd', args.workEnd);
+      return { path: '/meeting/check', params };
+    }
+  },
+  {
+    name: 'are_they_awake',
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    description: 'Say whether people in other cities are in work, awake, or sleep at a moment. Use for "3pm for me — can I ping Bangalore?". myTime defaults to now. Pass myTimezone as an IANA id or myCity as a place. Paste shareText. A rough window includes a plannerUrl with better aiSlots.',
+    inputSchema: {
+      type: 'object',
+      required: [],
+      properties: {
+        theirCity: { type: 'string', description: 'One city or timezone to judge.' },
+        theirCities: stringOrStringArraySchema('One or more cities or timezones to judge.'),
+        locations: stringOrStringArraySchema('Alias for theirCities.'),
+        myTime: { type: 'string', description: 'ISO instant, or a floating local time in myTimezone. Defaults to now.' },
+        myTimezone: { type: 'string', description: 'IANA timezone for the caller, such as America/Los_Angeles.' },
+        myCity: { type: 'string', description: 'Caller city, used when myTimezone is omitted.' },
+        date: { type: 'string', description: 'YYYY-MM-DD when myTime is only a clock time.' },
+        durationMinutes: { type: 'integer', description: 'Optional. Only 30, 45, or 60 are written onto the planner link.' },
+        workStart: { type: 'integer', description: 'First in-hours local hour. Default 9.' },
+        workEnd: { type: 'integer', description: 'Last in-hours local hour, inclusive. Default 18.' }
+      },
+      additionalProperties: false
+    },
+    buildRequest(args) {
+      const params = new URLSearchParams();
+      setParam(params, 'theirCity', args.theirCity);
+      setParam(params, 'theirCities', args.theirCities, { joinArraysWith: '|' });
+      setParam(params, 'locations', args.locations, { joinArraysWith: '|' });
+      setParam(params, 'myTime', args.myTime);
+      setParam(params, 'myTimezone', args.myTimezone);
+      setParam(params, 'myCity', args.myCity);
+      setParam(params, 'date', args.date);
+      setParam(params, 'durationMinutes', args.durationMinutes);
+      setParam(params, 'workStart', args.workStart);
+      setParam(params, 'workEnd', args.workEnd);
+      return { path: '/meeting/awake', params };
+    }
+  },
+  {
+    name: 'rank_recurring_slot',
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    description: 'Score who a weekly wall-clock time punishes, including a daylight-saving week when one falls in the next 26 weeks. Use for "Monday 9am PT standup for San Francisco, London, and Bangalore". weekday is a day name. time is a clock such as 9am. home is the IANA timezone of that clock. Paste shareText. The kinder slot and plannerUrl come from the meeting engine. If a week has context, tell the user that sentence. It says whether daylight saving skipped that local time or made it happen twice.',
+    inputSchema: {
+      type: 'object',
+      required: ['weekday', 'time', 'home'],
+      properties: {
+        locations: stringOrStringArraySchema('Two or more cities or timezones.'),
+        countryCodes: stringOrStringArraySchema('Optional ISO country hints aligned to locations.'),
+        weekday: { type: 'string', description: 'Day name such as Mon or Monday. 1 is Monday and 7 is Sunday.' },
+        time: { type: 'string', description: 'Clock time such as 9am or 09:00 in the home timezone.' },
+        home: { type: 'string', description: 'IANA timezone of the recurring clock, such as America/Los_Angeles.' },
+        occurrences: { type: 'integer', description: 'How many weeks to score before adding a DST week. Default 4. Max 8.' },
+        now: { type: 'string', description: 'Optional ISO instant used as "today" when choosing the next weekday. Defaults to the current time.' },
+        durationMinutes: { type: 'integer', description: 'Optional. Only 30, 45, or 60 are written onto the planner link.' },
+        workStart: { type: 'integer', description: 'First in-hours local hour. Default 9.' },
+        workEnd: { type: 'integer', description: 'Last in-hours local hour, inclusive. Default 18.' }
+      },
+      additionalProperties: false
+    },
+    buildRequest(args) {
+      ensureRequired(args, ['weekday', 'time', 'home'], 'rank_recurring_slot requires weekday, time, and home.');
+      if (!hasLocations(args)) {
+        throw invalidParamsError('rank_recurring_slot requires locations.');
+      }
+      const params = new URLSearchParams();
+      setParam(params, 'locations', args.locations, { joinArraysWith: '|' });
+      setParam(params, 'countryCodes', args.countryCodes, { joinArraysWith: '|' });
+      setParam(params, 'weekday', args.weekday);
+      setParam(params, 'time', args.time);
+      setParam(params, 'home', args.home);
+      setParam(params, 'occurrences', args.occurrences);
+      setParam(params, 'now', args.now);
+      setParam(params, 'durationMinutes', args.durationMinutes);
+      setParam(params, 'workStart', args.workStart);
+      setParam(params, 'workEnd', args.workEnd);
+      return { path: '/meeting/recurring', params };
     }
   },
   {
     name: 'search_timezones',
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-    description: 'Search production location records by city, country, or timezone-related query.',
+    description: 'Disambiguate a city, country, abbreviation, or timezone before calling other tools. Use this when a lookup is unknown or ambiguous, then retry get_current_time, convert_time, or find_meeting_time with candidate.suggestedQuery, candidate.suggestedId, or countryCode. This does not return the current time.',
     inputSchema: {
       type: 'object',
       required: ['query'],
@@ -385,7 +573,18 @@ const TOOL_DEFINITIONS = [
           type: 'integer',
           minimum: 1,
           maximum: 25,
-          description: 'Maximum number of results to return.'
+          description: 'Maximum number of search results to return.'
+        },
+        candidateLimit: {
+          type: 'integer',
+          minimum: 1,
+          maximum: 50,
+          description: 'Page size for namesake candidates. Default 6. Follow moreCandidates.resolve or moreCandidates.search for the rest.'
+        },
+        candidateOffset: {
+          type: 'integer',
+          minimum: 0,
+          description: 'Skip this many namesake candidates. Copy from moreCandidates.candidateOffset.'
         }
       },
       additionalProperties: false
@@ -396,20 +595,22 @@ const TOOL_DEFINITIONS = [
       setParam(params, 'query', args.query);
       setParam(params, 'countryCode', args.countryCode);
       setParam(params, 'limit', args.limit);
+      setParam(params, 'candidateLimit', args.candidateLimit);
+      setParam(params, 'candidateOffset', args.candidateOffset);
       return { path: '/locations/search', params };
     }
   },
   {
     name: 'get_location_by_id',
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-    description: 'Hydrate an exact production location record by stable findtime id.',
+    description: 'Hydrate an exact production location record by stable findtime id returned from search_timezones. Do not invent ids. If search_timezones has not been called, call it first.',
     inputSchema: {
       type: 'object',
       required: ['id'],
       properties: {
         id: {
           type: 'string',
-          description: 'Stable location id such as "findtime:victoria|CA|America/Vancouver".'
+          description: 'Stable location id. Current records use findtime:slug|CC|geonameId-or-state|TZ. Older findtime:slug|CC|TZ ids still resolve to the original city.'
         }
       },
       additionalProperties: false
@@ -429,7 +630,6 @@ for (const tool of TOOL_DEFINITIONS) {
   addEndUserIdSchemaProperty(tool);
 }
 let cachedResolveLocation;
-let cachedMcpClientId;
 
 function getMcpToolMode() {
   const mode = String(firstNonEmpty(
@@ -584,6 +784,11 @@ function firstNonEmpty(...values) {
   return null;
 }
 
+function truthyEnv(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return ['1', 'true', 'yes', 'on'].includes(normalized);
+}
+
 function parseInteger(value, fallback) {
   const parsed = Number.parseInt(String(value || ''), 10);
   return Number.isFinite(parsed) ? parsed : fallback;
@@ -603,51 +808,6 @@ function getMcpClientType() {
     process.env.FINDTIME_MCP_CLIENT_TYPE,
     process.env.TIME_API_CLIENT_TYPE
   ) || 'stdio';
-}
-
-function getMcpClientIdPath() {
-  const explicitDir = firstNonEmpty(process.env.FINDTIME_MCP_STATE_DIR);
-  if (explicitDir) {
-    return path.join(explicitDir, 'mcp-client-id');
-  }
-
-  const xdgStateHome = firstNonEmpty(process.env.XDG_STATE_HOME);
-  const baseDir = xdgStateHome
-    ? path.join(xdgStateHome, 'findtime')
-    : path.join(os.homedir(), '.findtime');
-  return path.join(baseDir, 'mcp-client-id');
-}
-
-function getMcpClientId() {
-  const explicit = firstNonEmpty(
-    process.env.FINDTIME_MCP_CLIENT_ID,
-    process.env.FINDTIME_MCP_INSTALL_ID
-  );
-  if (explicit) return explicit.slice(0, 128);
-
-  if (cachedMcpClientId) return cachedMcpClientId;
-
-  const idPath = getMcpClientIdPath();
-  try {
-    const existing = fs.readFileSync(idPath, 'utf8').trim();
-    if (existing) {
-      cachedMcpClientId = existing.slice(0, 128);
-      return cachedMcpClientId;
-    }
-  } catch (_error) {
-    // First run or unreadable state file. Generate below.
-  }
-
-  cachedMcpClientId = `mcp-${crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex')}`;
-
-  try {
-    fs.mkdirSync(path.dirname(idPath), { recursive: true, mode: 0o700 });
-    fs.writeFileSync(idPath, `${cachedMcpClientId}\n`, { mode: 0o600 });
-  } catch (_error) {
-    // Telemetry remains best-effort; an unwritable home directory should not break MCP.
-  }
-
-  return cachedMcpClientId;
 }
 
 function getRuntimeLocale() {
@@ -713,7 +873,7 @@ function recordMcpUsageTelemetry(input) {
     ? setTimeout(() => controller.abort(), MCP_USAGE_TELEMETRY_TIMEOUT_MS)
     : null;
 
-  fetch(MCP_USAGE_TELEMETRY_URL, {
+  return fetch(MCP_USAGE_TELEMETRY_URL, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(event),
@@ -940,7 +1100,11 @@ class ContentLengthMessageBuffer {
 
       const bodyBuffer = this.buffer.slice(headerEnd + 4, messageEnd);
       this.buffer = this.buffer.slice(messageEnd);
-      messages.push(JSON.parse(bodyBuffer.toString('utf8')));
+      try {
+        messages.push(JSON.parse(bodyBuffer.toString('utf8')));
+      } catch (_error) {
+        // Drop malformed framed JSON instead of crashing the stdio loop.
+      }
     }
 
     return messages;
@@ -973,32 +1137,74 @@ function summarizeToolPayload(toolName, payload) {
 }
 
 function buildToolErrorResult(toolName, apiResponse, options = {}) {
-  const summary = {
-    ok: false,
-    tool: toolName,
-    status: apiResponse.status,
-    url: apiResponse.url,
-    error: apiResponse.parsedBody !== undefined ? apiResponse.parsedBody : apiResponse.rawBody
-  };
+  return buildActionableErrorResult({
+    toolName,
+    args: options.args || {},
+    apiResponse,
+    extraCandidates: options.extraCandidates || [],
+    hint: options.hint || null,
+    thrownMessage: options.thrownMessage || ''
+  });
+}
 
-  if (apiResponse.networkError) {
-    summary.networkError = apiResponse.networkError;
-  }
+// Saved groups live on the hosted connector (Google sign-in). An API key has no account to read them from.
+const TEAM_STUB_MESSAGE = 'Saved groups need the hosted connector at https://mcp.findtime.io/mcp signed in with Google. Pass locations on each call.';
+const LOCATION_HELP_TOOLS = new Set([
+  'answer_time_question',
+  'get_current_time',
+  'convert_time',
+  'get_dst_schedule',
+  'get_overlap_hours',
+  'find_meeting_time',
+  'check_proposed_time',
+  'are_they_awake',
+  'rank_recurring_slot',
+  'time_snapshot',
+  'get_location_by_id'
+]);
 
-  if (options.hint) {
-    summary.hint = options.hint;
-  }
+function nameNeedsLocationHelp(toolName) {
+  return LOCATION_HELP_TOOLS.has(toolName);
+}
+const PASTE_TOOL_NAMES = new Set([
+  'find_meeting_time',
+  'check_proposed_time',
+  'are_they_awake',
+  'rank_recurring_slot'
+]);
 
-  return {
-    isError: true,
-    content: [
-      {
-        type: 'text',
-        text: summarizeToolPayload(toolName, summary)
+function presentLocationValue(value) {
+  if (Array.isArray(value)) return value.some((item) => String(item || '').trim());
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function hasLocations(args) {
+  if (!args) return false;
+  return presentLocationValue(args.locations)
+    || presentLocationValue(args.theirCities)
+    || presentLocationValue(args.theirCity);
+}
+
+function teamStubResult(teamId, toolName) {
+  const id = String(teamId || '').trim();
+  const result = buildActionableErrorResult({
+    toolName,
+    args: id ? { teamId: id } : {},
+    apiResponse: {
+      parsedBody: {
+        stub: true,
+        error: 'teams_not_persisted',
+        ...(id ? { teamId: id } : {}),
+        message: TEAM_STUB_MESSAGE
       }
-    ],
-    structuredContent: summary
-  };
+    }
+  });
+  result.content[0].text = TEAM_STUB_MESSAGE;
+  result.structuredContent.message = TEAM_STUB_MESSAGE;
+  result.structuredContent.stub = true;
+  result.structuredContent.error = 'teams_not_persisted';
+  if (id) result.structuredContent.teamId = id;
+  return result;
 }
 
 function buildToolSuccessResult(toolName, payload, apiMeta, options = {}) {
@@ -1011,12 +1217,15 @@ function buildToolSuccessResult(toolName, payload, apiMeta, options = {}) {
       ...(options.meta || {})
     }
   };
+  const shareText = payload && typeof payload.shareText === 'string'
+    ? payload.shareText.trim()
+    : '';
 
   return {
     content: [
       {
         type: 'text',
-        text: summarizeToolPayload(toolName, structuredContent)
+        text: shareText || summarizeToolPayload(toolName, structuredContent)
       }
     ],
     structuredContent
@@ -1139,11 +1348,25 @@ function createFindtimeMcpServer(options = {}) {
   const resolveLocationImpl = options.resolveLocationImpl === undefined
     ? loadResolveLocation()
     : options.resolveLocationImpl;
+  const missTrafficContext = {
+    clientType: options.clientType || getMcpClientType(),
+    accountEmail: options.accountEmail || firstNonEmpty(process.env.FINDTIME_MCP_ACCOUNT_EMAIL),
+    accountEmailHash: options.accountEmailHash || firstNonEmpty(process.env.FINDTIME_MCP_ACCOUNT_EMAIL_HASH),
+    internalQa: options.internalQa
+      || truthyEnv(process.env.FINDTIME_MCP_INTERNAL_QA)
+      || truthyEnv(process.env.FINDTIME_INTERNAL_QA),
+    trafficType: options.trafficType
+      || firstNonEmpty(process.env.FINDTIME_MCP_TRAFFIC_TYPE)
+      || (truthyEnv(process.env.FINDTIME_MCP_INTERNAL) ? 'internal_qa' : null),
+    userAgent: options.userAgent || `findtime-mcp/${SERVER_VERSION}`
+  };
+  const localMissLog = options.missLog || createMemoryMissLog();
 
   if (typeof fetchImpl !== 'function') {
     throw new Error('Fetch implementation is required to run the MCP server.');
   }
 
+  const attribution = options.attribution === undefined ? localAttribution() : normalizeAttribution(options.attribution);
   const state = {
     initialized: false,
     protocolVersion: DEFAULT_PROTOCOL_VERSION
@@ -1155,17 +1378,21 @@ function createFindtimeMcpServer(options = {}) {
       url.search = request.params.toString();
     }
 
+    const method = request.method || 'GET';
     const headers = {
       Accept: 'application/json',
       'User-Agent': `findtime-mcp/${SERVER_VERSION}`,
-      'X-Findtime-MCP-Tool': toolName
+      'X-Findtime-MCP-Tool': toolName,
+      'X-Findtime-Surface': 'mcp',
+      ...(request.headers || {}),
+      ...attributionHeaders({ ...attribution, toolName, mcpServerVersion: SERVER_VERSION })
     };
 
     if (typeof apiKey === 'string' && apiKey.trim()) {
       headers.Authorization = `Bearer ${apiKey.trim()}`;
     }
 
-    const clientUserId = getMcpClientId();
+    const clientUserId = attribution.installationId;
     if (typeof clientUserId === 'string' && clientUserId.trim()) {
       headers['X-Findtime-User-ID'] = clientUserId.trim();
     }
@@ -1185,11 +1412,16 @@ function createFindtimeMcpServer(options = {}) {
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
-      const response = await fetchImpl(url.toString(), {
-        method: 'GET',
+      const init = {
+        method,
         headers,
         signal: controller.signal
-      });
+      };
+      if (request.body !== undefined) {
+        headers['Content-Type'] = 'application/json';
+        init.body = JSON.stringify(request.body);
+      }
+      const response = await fetchImpl(url.toString(), init);
 
       const rawBody = await response.text();
       const parsedBody = tryParseJson(rawBody);
@@ -1281,10 +1513,124 @@ function createFindtimeMcpServer(options = {}) {
     }
   }
 
+  async function lookupSearchCandidates(query, requestMetadata) {
+    const searchQuery = firstNonEmpty(query);
+    if (!searchQuery) return [];
+    const params = new URLSearchParams();
+    params.set('query', searchQuery);
+    params.set('limit', '3');
+    const searchResponse = await fetchJson('search_timezones', {
+      path: '/locations/search',
+      params
+    }, requestMetadata);
+    const results = searchResponse.ok && searchResponse.parsedBody && Array.isArray(searchResponse.parsedBody.results)
+      ? searchResponse.parsedBody.results
+      : [];
+    return results.slice(0, 3);
+  }
+
+  async function fetchMissSummary(requestMetadata) {
+    const adminKey = firstNonEmpty(process.env[MISS_ADMIN_KEY_ENV]);
+    if (!adminKey) {
+      return {
+        available: false,
+        reason: 'admin_key_required',
+        adminKeyEnv: MISS_ADMIN_KEY_ENV
+      };
+    }
+    try {
+      const summaryResponse = await fetchJson('get_api_diagnostics', {
+        path: '/mcp/miss-summary',
+        params: new URLSearchParams(),
+        headers: { 'X-Findtime-Miss-Admin-Key': adminKey }
+      }, requestMetadata);
+      if (summaryResponse.ok && summaryResponse.parsedBody && typeof summaryResponse.parsedBody === 'object') {
+        const body = summaryResponse.parsedBody;
+        return {
+          available: true,
+          source: 'time-api',
+          retentionDays: body.retentionDays,
+          eventCount: body.eventCount,
+          byErrorClass: body.byErrorClass,
+          byTool: body.byTool
+        };
+      }
+    } catch (_error) {
+      // Counts stay unavailable rather than falling back to query-bearing buffers.
+    }
+    return {
+      available: false,
+      reason: 'summary_unavailable',
+      adminKeyEnv: MISS_ADMIN_KEY_ENV
+    };
+  }
+
+  async function postMissEvents(events) {
+    if (options.missLog || !Array.isArray(events) || events.length === 0) return;
+    if (isDroppedMissTraffic(missTrafficContext)) return;
+    const clientId = getMcpClientId();
+    await Promise.all(events.map((event) => fetchJson('send_feedback', {
+      method: 'POST',
+      path: '/mcp/miss',
+      params: new URLSearchParams(),
+      body: {
+        ...toRemoteMissEvent(event, clientId),
+        clientType: missTrafficContext.clientType,
+        trafficType: missTrafficContext.trafficType,
+        internalQa: missTrafficContext.internalQa,
+        accountEmailHash: missTrafficContext.accountEmailHash || undefined
+      }
+    })));
+  }
+
+  async function recordToolMiss(toolName, toolArgs, result, error = null, { remote = true } = {}) {
+    try {
+      const recorded = await localMissLog.record({
+        ...missTrafficContext,
+        tool: toolName,
+        args: scrubToolArgs(toolArgs || {}),
+        result,
+        error,
+        payload: result && result.structuredContent,
+        clientId: getMcpClientId()
+      });
+      if (!recorded.dropped && remote) {
+        await postMissEvents(recorded.events);
+      }
+    } catch (_error) {
+      // Miss-log writes must never fail the tool response.
+    }
+  }
+
+  async function toActionableApiError(toolName, toolArgs, apiResponse, extra = {}) {
+    let extraCandidates = extra.extraCandidates || [];
+    const parsed = apiResponse.parsedBody && typeof apiResponse.parsedBody === 'object'
+      ? apiResponse.parsedBody
+      : {};
+    const needsCandidates = parsed.notFound === true
+      || parsed.ambiguous === true
+      || apiResponse.status === 404;
+    if (needsCandidates && !extraCandidates.length && nameNeedsLocationHelp(toolName)) {
+      extraCandidates = await lookupSearchCandidates(
+        firstNonEmpty(toolArgs.query, toolArgs.city, toolArgs.from, parsed.query),
+        extra.requestMetadata || {}
+      );
+    }
+    return buildToolErrorResult(toolName, apiResponse, {
+      args: toolArgs,
+      extraCandidates,
+      hint: extra.hint || null
+    });
+  }
+
   async function callTool(name, args = {}) {
     const tool = TOOL_DEFINITIONS_BY_NAME.get(name);
     if (!tool || (getMcpToolMode() === 'answer-only' && !ANSWER_ONLY_TOOL_NAMES.has(name))) {
-      throw invalidParamsError(`Unknown tool: ${name}`);
+      return buildActionableErrorResult({
+        toolName: name,
+        args,
+        thrownMessage: `Unknown tool: ${name}`
+      });
     }
 
     const extracted = extractEndUserId(args || {});
@@ -1293,6 +1639,14 @@ function createFindtimeMcpServer(options = {}) {
       endUserId: extracted.endUserId,
       endUserIdPresent: Boolean(extracted.endUserId)
     };
+
+    if (PASTE_TOOL_NAMES.has(name) && String(toolArgs.teamId || '').trim()) {
+      if (hasLocations(toolArgs)) {
+        delete toolArgs.teamId;
+      } else {
+        return teamStubResult(toolArgs.teamId, name);
+      }
+    }
 
     if (name === 'get_findtime_help') {
       const help = buildFindtimeHelpPayload();
@@ -1307,11 +1661,64 @@ function createFindtimeMcpServer(options = {}) {
       };
     }
 
+    if (name === 'send_feedback') {
+      try {
+        ensureRequired(toolArgs, ['tool', 'query', 'whatWasWrong'], 'send_feedback requires tool, query, and whatWasWrong.');
+      } catch (error) {
+        return buildActionableErrorResult({
+          toolName: name,
+          args: toolArgs,
+          thrownMessage: error.message,
+          apiResponse: { status: 400 }
+        });
+      }
+      const feedbackPayload = {
+        ok: true,
+        recorded: true,
+        errorClass: 'agent_feedback',
+        tool: String(toolArgs.tool || '').trim(),
+        message: 'Feedback counted on the 90-day miss log. Query text was discarded and is not stored.'
+      };
+      await recordToolMiss(toolArgs.tool || name, {
+        tool: toolArgs.tool
+      }, {
+        structuredContent: feedbackPayload
+      }, null, { remote: false });
+      if (!options.missLog) {
+        const feedbackResponse = await fetchJson(name, {
+          method: 'POST',
+          path: '/mcp/feedback',
+          params: new URLSearchParams(),
+          body: {
+            tool: feedbackPayload.tool,
+            clientId: getMcpClientId(),
+            clientType: missTrafficContext.clientType,
+            trafficType: missTrafficContext.trafficType,
+            internalQa: missTrafficContext.internalQa,
+            accountEmailHash: missTrafficContext.accountEmailHash || undefined
+          }
+        }, requestMetadata).catch(() => ({ ok: false }));
+        // A missing or rejected API key means the report never reached findtime.io; say so.
+        if (feedbackResponse && (feedbackResponse.status === 401 || feedbackResponse.status === 403)) {
+          return buildActionableErrorResult({
+            toolName: name,
+            args: { tool: feedbackPayload.tool },
+            apiResponse: feedbackResponse
+          });
+        }
+      }
+      return {
+        content: [{ type: 'text', text: feedbackPayload.message }],
+        structuredContent: feedbackPayload
+      };
+    }
+
     if (name === 'get_api_diagnostics') {
       const request = tool.buildRequest(toolArgs);
-      const [apiResponse, latestMcpVersionCheck] = await Promise.all([
+      const [apiResponse, latestMcpVersionCheck, missLog] = await Promise.all([
         fetchJson(name, request, requestMetadata),
-        fetchLatestMcpVersion()
+        fetchLatestMcpVersion(),
+        fetchMissSummary(requestMetadata)
       ]);
       const checkedAt = new Date().toISOString();
       const latestVersion = latestMcpVersionCheck.latestVersion || null;
@@ -1340,7 +1747,8 @@ function createFindtimeMcpServer(options = {}) {
         ) || null,
         apiHealthUrl: apiResponse.url,
         apiStatus: apiResponse.status,
-        apiReachable: apiResponse.ok
+        apiReachable: apiResponse.ok,
+        missLog
       };
 
       if (apiResponse.ok) {
@@ -1362,7 +1770,20 @@ function createFindtimeMcpServer(options = {}) {
       });
     }
 
-    const request = tool.buildRequest(toolArgs);
+    let request;
+    try {
+      request = tool.buildRequest(toolArgs);
+    } catch (error) {
+      if (error && error.code === -32602) {
+        return buildActionableErrorResult({
+          toolName: name,
+          args: toolArgs,
+          thrownMessage: error.message,
+          apiResponse: { status: 400 }
+        });
+      }
+      throw error;
+    }
     let apiResponse = await fetchJson(name, request, requestMetadata);
 
     if (!apiResponse.ok) {
@@ -1378,7 +1799,7 @@ function createFindtimeMcpServer(options = {}) {
           const retryResponse = await fetchJson(name, retryRequest, requestMetadata);
 
           if (retryResponse.ok) {
-            return buildToolSuccessResult(name, retryResponse.parsedBody, {
+            return buildToolSuccessResult(name, enrichResolvedPayload(name, retryResponse.parsedBody, toolArgs), {
               endpoint: retryRequest.path,
               url: retryResponse.url
             }, {
@@ -1395,13 +1816,14 @@ function createFindtimeMcpServer(options = {}) {
             });
           }
 
-          return buildToolErrorResult(name, retryResponse, {
-            hint: buildCountryQueryHint(rawCountryQuery, resolvedCountry)
+          return toActionableApiError(name, toolArgs, retryResponse, {
+            hint: buildCountryQueryHint(rawCountryQuery, resolvedCountry),
+            requestMetadata
           });
         }
       }
 
-      return buildToolErrorResult(name, apiResponse);
+      return toActionableApiError(name, toolArgs, apiResponse, { requestMetadata });
     }
 
     let payload = apiResponse.parsedBody;
@@ -1413,12 +1835,21 @@ function createFindtimeMcpServer(options = {}) {
       meta = enriched.meta;
     }
 
+    payload = enrichResolvedPayload(name, payload, toolArgs);
+
     return buildToolSuccessResult(name, payload, {
       endpoint: request.path,
       url: apiResponse.url
     }, {
       meta
     });
+  }
+
+  function scheduleTracking(task) {
+    const pending = Promise.resolve().then(task).catch(() => {});
+    try {
+      if (typeof options.scheduleTracking === 'function') options.scheduleTracking(pending);
+    } catch (_error) {}
   }
 
   async function handleMessage(message) {
@@ -1434,6 +1865,12 @@ function createFindtimeMcpServer(options = {}) {
 
     try {
       if (method === 'initialize') {
+        const clientInfo = message.params && message.params.clientInfo;
+        Object.assign(attribution, normalizeAttribution({
+          ...attribution,
+          clientName: clientInfo && clientInfo.name || attribution.clientName,
+          clientVersion: clientInfo && clientInfo.version || attribution.clientVersion
+        }));
         state.initialized = true;
         state.protocolVersion = negotiateProtocolVersion(message.params && message.params.protocolVersion);
 
@@ -1461,10 +1898,11 @@ function createFindtimeMcpServer(options = {}) {
 
       if (method === 'tools/list') {
         return createSuccessResponse(message.id, {
-          tools: getVisibleToolDefinitions().map(({ name, description, inputSchema, annotations }) => ({
+          tools: getVisibleToolDefinitions().map(({ name, description, inputSchema, outputSchema, annotations }) => ({
             name,
             description,
             inputSchema,
+            ...(outputSchema ? { outputSchema } : {}),
             annotations
           }))
         });
@@ -1476,20 +1914,26 @@ function createFindtimeMcpServer(options = {}) {
         const startedAt = Date.now();
         try {
           const result = await callTool(toolName, toolArgs);
-          recordMcpUsageTelemetry({
+          if (toolName !== 'send_feedback' && toolName !== 'get_api_diagnostics' && toolName !== 'get_findtime_help') {
+            scheduleTracking(() => recordToolMiss(toolName, toolArgs, result));
+          }
+          scheduleTracking(() => recordMcpUsageTelemetry({
             toolName,
             args: scrubToolArgs(toolArgs),
             result,
             latencyMs: Date.now() - startedAt
-          });
+          }));
           return createSuccessResponse(message.id, result);
         } catch (toolError) {
-          recordMcpUsageTelemetry({
+          if (Number(toolError && toolError.code) !== -32602) {
+            scheduleTracking(() => recordToolMiss(toolName, toolArgs, null, toolError));
+          }
+          scheduleTracking(() => recordMcpUsageTelemetry({
             toolName,
             args: scrubToolArgs(toolArgs),
             error: toolError,
             latencyMs: Date.now() - startedAt
-          });
+          }));
           throw toolError;
         }
       }
