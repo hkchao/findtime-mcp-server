@@ -24,14 +24,6 @@ on:
         required: false
         default: true
         type: boolean
-      npm_auth:
-        description: npm auth. oidc = trusted publishing (normal). token = fallback using the NPM_TOKEN secret.
-        required: false
-        default: oidc
-        type: choice
-        options:
-          - oidc
-          - token
 
 permissions:
   contents: read
@@ -148,16 +140,8 @@ jobs:
         if: >-
           steps.existing.outputs.published != 'true' &&
           (github.event_name == 'push' ||
-           (github.event_name == 'workflow_dispatch' && !inputs.dry_run && inputs.npm_auth != 'token'))
+           (github.event_name == 'workflow_dispatch' && !inputs.dry_run))
         run: npm publish --provenance --access public
-
-      - name: Publish package (NPM_TOKEN fallback)
-        if: >-
-          steps.existing.outputs.published != 'true' &&
-          github.event_name == 'workflow_dispatch' && !inputs.dry_run && inputs.npm_auth == 'token'
-        run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Verify npm shows the new version and latest dist-tag
         if: github.event_name == 'push' || !inputs.dry_run

@@ -54,7 +54,7 @@ Release source of truth:
 
 - Publish only from the public package repo, `https://github.com/hkchao/findtime-mcp-server`, from a release tag `v<version>`.
 - In `world-time-ai`, the package implementation lives under `services/mcp-server`. Sync changes into the public repo first; never publish from `world-time-ai`.
-- The package includes `server.js`, `help-catalog.cjs`, `README.md`, `SKILL.md`, `LICENSE`, and `examples`.
+- The package includes `server.js`, `actionable-errors.cjs`, `help-catalog.cjs`, `README.md`, `SKILL.md`, `LICENSE`, and `examples`. It never includes `booking-tools.cjs`: booking tools are hosted-only. This repo's `README.md` is the source copy, including the hosted-scope table; port README changes from here to `services/mcp-server/README.md` in `world-time-ai`, not the other way round.
 - `package.json` `version`, `server.json` `version`, and the npm entry's `version` in `server.json` `packages` must all match. `npm run release:check` and the registry workflow both fail when they don't.
 
 Normal release (CI, the default path):
@@ -74,10 +74,10 @@ git push origin v<version>
 
 CI settings the release depends on (names only; never paste a secret value into chat, a commit, or a log):
 
+- There are no npm tokens. Publishing is trusted publishing only: `@findtime/mcp-server` disallows token publishing and every npm token was deleted on Nov 1, 2026. `publish.yml` has no token step. Dispatch manual runs from the GitHub Actions UI; the `gh` PAT gets a 403 on workflow dispatch.
 - npm trusted publisher on `@findtime/mcp-server` (npmjs.com, package Settings, Trusted Publisher): GitHub Actions, organization or user `hkchao`, repository `findtime-mcp-server`, workflow filename `publish.yml`, no environment, direct `npm publish` allowed. A new trusted publisher must complete its first successful publish within 2 days or it expires.
 - `package.json` `repository.url` must stay `git+https://github.com/hkchao/findtime-mcp-server.git`. npm rejects trusted publishes from a repo that doesn't match it.
 - `publish.yml` needs `permissions: id-token: write`, Node 24 and npm 11.5.1 or later. The job fails early if npm is older.
-- Repo secret `NPM_TOKEN` is only the fallback, used when a dispatch sets `npm_auth` to `token`. A write-enabled npm granular token lasts at most 90 days, so expect it to be expired unless someone just rotated it.
 - MCP Registry auth is GitHub OIDC (`mcp-publisher login github-oidc`), which allows `io.github.hkchao/*` from workflows in `hkchao` repos. No secret.
 
 Manual dispatch and re-runs:
@@ -99,13 +99,10 @@ The release check is mandatory before publish. `prepublishOnly` will reject raw 
 
 Common publish blockers and fixes:
 
-- `E404 Not Found - PUT https://registry.npmjs.org/@findtime%2fmcp-server` for a package that exists: npm answers 404 instead of 403 when the credential can't publish this package. In CI that means trusted publishing didn't apply (no trusted publisher on the package, a field mismatch, or npm older than 11.5.1) and npm fell back to an expired, revoked, read-only or wrong-package `NPM_TOKEN`. Every tag publish from `v3.27.2` (Sep 2026) through `v3.27.4` failed this way; the `NPM_TOKEN` secret was last set in March 2026, so it had most likely expired. Check the trusted publisher fields and the job's npm version first; don't just paste a new token.
+- `E404 Not Found - PUT https://registry.npmjs.org/@findtime%2fmcp-server` for a package that exists: npm answers 404 instead of 403 when the credential can't publish this package. In CI that means trusted publishing didn't apply (no trusted publisher on the package, a field mismatch, or npm older than 11.5.1). Every tag publish from `v3.27.2` (Sep 2026) through `v3.27.4` failed this way under the old token-only workflow. Check the trusted publisher fields and the job's npm version first.
 - `ENEEDAUTH` or "Unable to authenticate" in CI: no usable credential. Check the trusted publisher's workflow filename is exactly `publish.yml` (case-sensitive, with `.yml`), the job has `id-token: write`, and it runs on a GitHub-hosted runner.
 - `E403` with `E_STAGE_REQUIRED`, or a version that lands in npm's Staged Packages instead of going live: the trusted publisher only allows `npm stage publish`. Allow direct `npm publish` on it, or approve the staged version with 2FA on npmjs.com.
 - Provenance errors (`E422`, "Error verifying sigstore provenance bundle", or a repository mismatch): `package.json` `repository.url` doesn't match `hkchao/findtime-mcp-server`, or the publish didn't come from GitHub Actions. Provenance only works from CI; for a hand publish drop `--provenance`.
-- `E403` with "Two-factor authentication or granular access token with bypass 2fa enabled is required": create a granular npm access token with **Read and write** access to `@findtime/mcp-server` and **Bypass two-factor authentication** enabled, or provide a fresh interactive npm OTP if the package permits OTP publishing.
-- Package settings must allow "Require two-factor authentication or a granular access token with bypass 2FA enabled." If package settings disallow tokens, granular tokens will still fail. Trusted publishing keeps working either way.
-- `EOTP` after `npm whoami` succeeds: the CLI used the logged-in account auth instead of a bypass-capable granular token. If a bypass token is available, do not keep retrying normal `npm publish`; use the temporary `--userconfig` token publish pattern below.
 - `EPERM` under `~/.npm/_cacache`: avoid root-owned npm cache issues by pointing `--cache` at a fresh temp directory, for example `--cache "$(mktemp -d)"`.
 - `ENOTFOUND registry.npmjs.org` or similar DNS/network failures from the sandbox: retry the publish with network escalation instead of assuming the package or token is broken.
 - MCP Registry rejects the publish: check that npm already has the version, that `server.json` versions match `package.json`, and that `server.json` `name` equals `package.json` `mcpName`.
@@ -126,29 +123,6 @@ FINDTIME_MCP_RELEASE_CHECKED=<version> npm publish --access public
 ```
 
 npm asks for 2FA during publish. A hand publish has no provenance. Then run the registry-only dispatch above, verify, and delete the temporary clone.
-
-Safer token publish pattern:
-
-Use this path first when the user has provided a granular npm token with bypass 2FA. Do not rely on `npm whoami` as proof that publish will not need an OTP. Do not put the raw token directly in the shell command string, because command strings can be logged by shells, terminals, approval prompts, or process listings. Run it from a clean checkout of the release tag.
-
-```bash
-trap 'stty echo' EXIT
-stty -echo
-read NPM_TOKEN
-stty echo
-trap - EXIT
-export NODE_AUTH_TOKEN="$NPM_TOKEN"
-unset NPM_TOKEN
-RELEASE_TMP="$(mktemp -d)"
-printf '//registry.npmjs.org/:_authToken=${NODE_AUTH_TOKEN}\n' > "$RELEASE_TMP/npmrc"
-FINDTIME_MCP_RELEASE_CHECKED=<version> npm publish --access public \
-  --userconfig "$RELEASE_TMP/npmrc" \
-  --cache "$RELEASE_TMP/cache"
-rm -rf "$RELEASE_TMP"
-unset NODE_AUTH_TOKEN
-```
-
-If the first publish attempt already failed with `EOTP`, rerun the same publish through this token-backed npmrc path instead of asking for a new token. A valid token can still fail OTP if it was not actually the auth source used by npm.
 
 After publishing, verify the live package:
 
@@ -298,16 +272,35 @@ Use specific tools when the agent has already parsed the task into structured in
 - `convert_time`: convert a known date/time from one place or timezone to another
 - `get_dst_schedule`: DST status and transition dates
 - `get_overlap_hours`: working-hours overlap between places or timezones
-- `find_meeting_time`: ranked meeting slots across multiple participants or locations
+- `find_meeting_time`: ranked meeting slots across multiple participants or locations. Paste `shareText`. The planner link includes `aiSlots`, legacy `aiTime`, and `ref=mcp-bot`.
+- `check_proposed_time`: verdict for a clock time the user already picked. Paste `shareText`. If `context` is set, tell the user that sentence. It says whether daylight saving skipped the local time or made it happen twice.
+- `are_they_awake`: work, awake, or sleep for other cities at one moment. Paste `shareText`.
+- `rank_recurring_slot`: who a weekly wall time punishes, plus a kinder slot. Paste `shareText`. If a week has `context`, tell the user that sentence. It says whether daylight saving skipped that local time or made it happen twice.
+- `save_team`, `get_team`, `list_teams`, `rename_team`, `delete_team` (hosted connector only): the homepage planner Saved groups for the same Google account. Call `list_teams` and pass that exact name as `teamId` when the call has no locations. `Marketing` and `marketing` are two groups. Add or remove a city with `save_team` and the full city list. A city may be a plain name or `City|IANA`. `save_team`, `rename_team` and `delete_team` need `meetings:plan`. `list_teams` and `get_team` need `time:read`. A deleted group stays deleted. The npm package has no team tools, and a `teamId` sent with an API key gets `teams_not_persisted`. Pass locations inline in that case.
+- `send_feedback`: report a wrong, incomplete, or unhelpful findtime.io answer with `tool`, `query`, and `whatWasWrong`. The query text is discarded; only the tool name and error class are kept.
 - `search_timezones`: search, resolve, or disambiguate locations and timezone abbreviations
 - `time_snapshot`: richer present-moment context for a place or timezone
 - `get_location_by_id`: hydrate a known location ID returned by another `findtime.io` MCP response
+
+### Hosted connector: meetings and booking
+
+The hosted connector at `https://mcp.findtime.io/mcp` (Streamable HTTP, Google sign-in over OAuth) has every tool above plus saved groups and booking. The npm package (stdio, API key) has neither: both need a signed-in Google account, and an API key never gets booking tools.
+
+- Scopes: a client that names no scope gets `time:read meetings:plan`. It asks for `booking:request` or `booking:host` by name. A call without the scope it needs answers 403 `insufficient_scope` with the scopes to ask for on the next sign-in.
+- Meeting planning: `find_meeting_time` and `get_overlap_hours` need `meetings:plan`. `check_proposed_time`, `are_they_awake` and `rank_recurring_slot` need `time:read`.
+- Saved groups: `list_teams` and `get_team` need `time:read`. `save_team`, `rename_team` and `delete_team` need `meetings:plan`. Pass a group's exact name as `teamId` to the meeting tools when the call has no locations.
+- Guest booking: `get_host_booking_profile`, `find_host_slots`, `get_booking_status`, `list_my_booking_requests` and `cancel_booking` need `time:read`; status, history and cancel also take the guest's tracking or history token. `request_booking` and `reschedule_booking` need `booking:request`.
+- Host booking, all `booking:host`: `get_my_booking_page`, `update_booking_page`, `list_booking_requests`, `approve_booking_request`, `decline_booking_request`, `cancel_booking_as_host`, `create_invite_link` and `revoke_invite_link`. They act only on the signed-in host's own page.
+- Every booking write is two steps. The first call, without `confirm`, returns a read-back and changes nothing. Show it, wait for the person's yes, then call again with the same arguments and `confirm: true`.
+- An agent never confirms a meeting. The host approves or declines every request.
+- Docs: `https://findtime.io/developers/mcp/#booking-tools` (tools and setup) and `https://findtime.io/developers/#booking-api` (the booking routes these tools call).
 
 ## Answering Rules
 
 When using `findtime.io` MCP:
 
 - Treat IANA timezone IDs as canonical timezone identifiers.
+- Say the modern city name. Bangalore returns Bengaluru, Bombay returns Mumbai, Peking returns Beijing, Saigon returns Ho Chi Minh City, Kiev returns Kyiv, and Madras returns Chennai. Calcutta returns Kolkata. Madras, Oregon returns the town in Oregon.
 - Treat timezone abbreviations such as `CST`, `IST`, `PST`, and `EST` as ambiguous unless the tool response resolves them confidently.
 - Preserve explicit ambiguity or clarification messages from the tool instead of guessing.
 - Preserve weekday, date, time, timezone abbreviation, and UTC offset fields exactly as returned by the tool. Do not recompute, shift, or "correct" day names during natural-language synthesis.
