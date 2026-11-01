@@ -75,10 +75,9 @@ async function callTool(server, name, args) {
   return response.result;
 }
 
-// The calls that reach the Time API for the tool itself (not miss-log or telemetry side requests).
+// The calls that reach the Time API for the tool itself (not telemetry side requests).
 function toolCalls(calls, toolName) {
-  return calls.filter((call) => call.init.headers['X-Findtime-MCP-Tool'] === toolName
-    && !call.url.pathname.startsWith('/mcp/miss'));
+  return calls.filter((call) => call.init.headers['X-Findtime-MCP-Tool'] === toolName);
 }
 
 test('tools/list is the hosted core set without team or booking tools', async () => {
@@ -173,7 +172,7 @@ test('send_feedback posts the tool name to /mcp/feedback and never the query tex
   assert.equal(call.url.pathname, '/mcp/feedback');
   assert.equal(call.init.headers.Authorization, 'Bearer test-key');
   const body = JSON.parse(call.init.body);
-  assert.equal(body.tool, 'convert_time');
+  assert.deepEqual(body, { tool: 'convert_time' });
   assert.equal(JSON.stringify(body).includes('Paris'), false);
   assert.equal(JSON.stringify(body).includes('wrong offset'), false);
 });
@@ -182,7 +181,7 @@ test('send_feedback without its required fields is an error and sends nothing', 
   const calls = [];
   const result = await callTool(makeServer(calls), 'send_feedback', { tool: 'convert_time' });
   assert.equal(result.isError, true);
-  assert.equal(toolCalls(calls, 'send_feedback').length, 0);
+  assert.equal(calls.length, 0);
 });
 
 const NEW_TOOL_CALLS = {

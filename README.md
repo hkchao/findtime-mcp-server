@@ -348,14 +348,8 @@ and quotas. The wrapper forwards upstream failures, including HTTP 429, as MCP
 tool errors. It does not expose a public HTTP listener or implement a separate
 local rate limiter. Help is local; diagnostics also reads npm version metadata.
 
-Miss reports: when a tool call fails, a location can't be resolved, or the
-same client quickly re-asks, the
-wrapper posts a miss event to the configured Time API (`/mcp/miss`) with the
-tool name, an error class, result flags, a candidate count, the installation
-identifier, and the client and traffic type. `send_feedback` posts the tool
-name and the same metadata to `/mcp/feedback`. Neither sends query text,
-`whatWasWrong`, or the API key in the body; the key goes only in the
-`Authorization` header, as for every Time API call.
+`send_feedback` posts only the tool name to `/mcp/feedback` on the configured
+Time API. It never sends the query text or `whatWasWrong`.
 
 Optional usage telemetry goes to `https://slack.findtime.io/telemetry/usage` by
 default. The wrapper sends tool name, outcome, query-text length, a persistent

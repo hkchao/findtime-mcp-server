@@ -20,60 +20,38 @@ const {
   encodeMessage
 } = require('./server.js');
 
-test('standard initialization attributes API requests without changing tool answers', async () => {
+test('tool requests send only the standard request headers', async () => {
   const calls = [];
-  const server = createFindtimeMcpServer({
-    attribution: { trafficType: 'internal_qa', callerLabel: 'local-review', installationId: 'install-one' },
-    fetchImpl: makeCapturingFetch(calls)
-  });
+  const server = createFindtimeMcpServer({ fetchImpl: makeCapturingFetch(calls) });
   await server.handleMessage({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {
-    clientInfo: { name: 'codex', version: '1.2.3' }
+    clientInfo: { name: 'example-client', version: '1.2.3' }
   } });
   const result = await callCurrentTime(server, { query: 'Tokyo' });
   assert.equal(result.result.isError, undefined);
   const headers = calls[0].init.headers;
-  assert.equal(headers['X-Findtime-MCP-Client-Name'], 'codex');
-  assert.equal(headers['X-Findtime-MCP-Client-Version'], '1.2.3');
-  assert.equal(headers['X-Findtime-MCP-Installation-ID'], 'install-one');
-  assert.equal(headers['X-Findtime-MCP-Traffic-Type'], 'internal_qa');
-  assert.equal(headers['X-Findtime-MCP-Caller-Label'], 'local-review');
   assert.equal(headers['X-Findtime-MCP-Tool'], 'get_current_time');
-});
-
-test('malformed optional caller metadata never changes the time answer', async () => {
-  const calls = [];
-  const server = createFindtimeMcpServer({
-    attribution: { callerLabel: 'a'.repeat(129), trafficType: {}, installationId: 'bad\r\nheader' },
-    fetchImpl: makeCapturingFetch(calls)
-  });
-  await server.handleMessage({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {
-    clientInfo: { name: {}, version: 'bad\nversion' }
-  } });
-  const result = await callCurrentTime(server, { query: 'Tokyo' });
-  assert.equal(result.result.isError, undefined);
-  assert.equal(calls[0].init.headers['X-Findtime-MCP-Client-Name'], undefined);
-  assert.equal(calls[0].init.headers['X-Findtime-MCP-Caller-Label'], undefined);
+  assert.equal(headers['X-Findtime-Surface'], undefined);
+  for (const name of Object.keys(headers)) {
+    assert.ok(!/^X-Findtime-MCP-(Client|Installation|Caller|Traffic|Test|Server)/i.test(name), `unexpected header ${name}`);
+  }
 });
 
 test('a pending or failed tracking write cannot hold up a tool answer', async () => {
-  for (const record of [() => new Promise(() => {}), () => Promise.reject(new Error('tracking offline'))]) {
-    const pending = [];
-    const server = createFindtimeMcpServer({
-      missLog: { record },
-      scheduleTracking: (task) => pending.push(task),
-      fetchImpl: makeCapturingFetch([])
-    });
-    let timer;
-    try {
-      const response = await Promise.race([
-        callCurrentTime(server, { query: 'Tokyo' }),
-        new Promise((_resolve, reject) => { timer = setTimeout(() => reject(new Error('answer waited for tracking')), 500); })
-      ]);
-      assert.equal(response.result.isError, undefined);
-      assert.ok(pending.length);
-    } finally {
-      clearTimeout(timer);
-    }
+  const pending = [];
+  const server = createFindtimeMcpServer({
+    scheduleTracking: (task) => pending.push(task),
+    fetchImpl: makeCapturingFetch([])
+  });
+  let timer;
+  try {
+    const response = await Promise.race([
+      callCurrentTime(server, { query: 'Tokyo' }),
+      new Promise((_resolve, reject) => { timer = setTimeout(() => reject(new Error('answer waited for tracking')), 500); })
+    ]);
+    assert.equal(response.result.isError, undefined);
+    assert.ok(pending.length);
+  } finally {
+    clearTimeout(timer);
   }
 });
 

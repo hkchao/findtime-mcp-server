@@ -10,9 +10,7 @@
   "type": "commonjs",
   "files": [
     "server.js",
-    "attribution.cjs",
     "actionable-errors.cjs",
-    "miss-log.cjs",
     "help-catalog.cjs",
     "README.md",
     "SKILL.md",

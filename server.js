@@ -3,7 +3,6 @@ const fs = require('node:fs');
 const path = require('node:path');
 const os = require('node:os');
 const crypto = require('node:crypto');
-const { installationId: getMcpClientId, localAttribution, normalizeAttribution, attributionHeaders } = require('./attribution.cjs');
 
 const PACKAGE_ROOT = __dirname;
 const LOCAL_PACKAGE_PATH = path.join(PACKAGE_ROOT, 'package.json');
@@ -78,14 +77,6 @@ const {
   buildActionableErrorResult,
   enrichResolvedPayload
 } = require('./actionable-errors.cjs');
-const {
-  createMemoryMissLog,
-  hashClientId,
-  isDroppedMissTraffic,
-  toRemoteMissEvent
-} = require('./miss-log.cjs');
-const MISS_ADMIN_KEY_ENV = 'TIME_API_MCP_MISS_ADMIN_KEY';
-
 const TOOL_DEFINITIONS = [
   {
     name: 'answer_time_question',
@@ -132,7 +123,7 @@ const TOOL_DEFINITIONS = [
   {
     name: 'get_api_diagnostics',
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
-    description: 'Return MCP and findtime Time API diagnostics: running MCP version, latest published version, API base URL, auth configuration, and live health. If TIME_API_MCP_MISS_ADMIN_KEY is configured, also include aggregate miss-log counts (no query text). Call this after auth or connectivity failures. It does not answer time questions.',
+    description: 'Return MCP and findtime Time API diagnostics: running MCP version, latest published version, API base URL, auth configuration, and live health. Call this after auth or connectivity failures. It does not answer time questions.',
     inputSchema: {
       type: 'object',
       properties: {},
@@ -145,7 +136,7 @@ const TOOL_DEFINITIONS = [
   {
     name: 'send_feedback',
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
-    description: 'Report a wrong, incomplete, or unhelpful findtime.io MCP answer. Call this after a tool result that you or the user judged incorrect. Required: tool, query, and whatWasWrong. Optional: expectedAnswer. Query text is used only to classify the report and is discarded; the miss log stores tool, error class, flags, and counts — not the query, expected answer, or any free text. Never send names, emails, phone numbers, IP addresses, or raw user ids.',
+    description: 'Report a wrong, incomplete, or unhelpful findtime.io MCP answer. Call this after a tool result that you or the user judged incorrect. Required: tool, query, and whatWasWrong. Optional: expectedAnswer. Only the tool name is sent to findtime.io; the query, expected answer, and other free text stay local and are discarded. Never send names, emails, phone numbers, IP addresses, or raw user ids.',
     inputSchema: {
       type: 'object',
       required: ['tool', 'query', 'whatWasWrong'],
@@ -803,6 +794,53 @@ function isMcpUsageTelemetryEnabled() {
   return !['false', '0', 'off', 'no'].includes(normalized);
 }
 
+let cachedMcpClientId = null;
+
+function getMcpClientIdPath() {
+  const explicitDir = firstNonEmpty(process.env.FINDTIME_MCP_STATE_DIR);
+  if (explicitDir) {
+    return path.join(explicitDir, 'mcp-client-id');
+  }
+
+  const xdgStateHome = firstNonEmpty(process.env.XDG_STATE_HOME);
+  const baseDir = xdgStateHome
+    ? path.join(xdgStateHome, 'findtime')
+    : path.join(os.homedir(), '.findtime');
+  return path.join(baseDir, 'mcp-client-id');
+}
+
+function getMcpClientId() {
+  const explicit = firstNonEmpty(
+    process.env.FINDTIME_MCP_CLIENT_ID,
+    process.env.FINDTIME_MCP_INSTALL_ID
+  );
+  if (explicit) return explicit.slice(0, 128);
+
+  if (cachedMcpClientId) return cachedMcpClientId;
+
+  const idPath = getMcpClientIdPath();
+  try {
+    const existing = fs.readFileSync(idPath, 'utf8').trim();
+    if (existing) {
+      cachedMcpClientId = existing.slice(0, 128);
+      return cachedMcpClientId;
+    }
+  } catch (_error) {
+    // First run or unreadable state file. Generate below.
+  }
+
+  cachedMcpClientId = `mcp-${crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex')}`;
+
+  try {
+    fs.mkdirSync(path.dirname(idPath), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(idPath, `${cachedMcpClientId}\n`, { mode: 0o600 });
+  } catch (_error) {
+    // Telemetry remains best-effort; an unwritable home directory should not break MCP.
+  }
+
+  return cachedMcpClientId;
+}
+
 function getMcpClientType() {
   return firstNonEmpty(
     process.env.FINDTIME_MCP_CLIENT_TYPE,
@@ -1348,25 +1386,11 @@ function createFindtimeMcpServer(options = {}) {
   const resolveLocationImpl = options.resolveLocationImpl === undefined
     ? loadResolveLocation()
     : options.resolveLocationImpl;
-  const missTrafficContext = {
-    clientType: options.clientType || getMcpClientType(),
-    accountEmail: options.accountEmail || firstNonEmpty(process.env.FINDTIME_MCP_ACCOUNT_EMAIL),
-    accountEmailHash: options.accountEmailHash || firstNonEmpty(process.env.FINDTIME_MCP_ACCOUNT_EMAIL_HASH),
-    internalQa: options.internalQa
-      || truthyEnv(process.env.FINDTIME_MCP_INTERNAL_QA)
-      || truthyEnv(process.env.FINDTIME_INTERNAL_QA),
-    trafficType: options.trafficType
-      || firstNonEmpty(process.env.FINDTIME_MCP_TRAFFIC_TYPE)
-      || (truthyEnv(process.env.FINDTIME_MCP_INTERNAL) ? 'internal_qa' : null),
-    userAgent: options.userAgent || `findtime-mcp/${SERVER_VERSION}`
-  };
-  const localMissLog = options.missLog || createMemoryMissLog();
 
   if (typeof fetchImpl !== 'function') {
     throw new Error('Fetch implementation is required to run the MCP server.');
   }
 
-  const attribution = options.attribution === undefined ? localAttribution() : normalizeAttribution(options.attribution);
   const state = {
     initialized: false,
     protocolVersion: DEFAULT_PROTOCOL_VERSION
@@ -1383,16 +1407,14 @@ function createFindtimeMcpServer(options = {}) {
       Accept: 'application/json',
       'User-Agent': `findtime-mcp/${SERVER_VERSION}`,
       'X-Findtime-MCP-Tool': toolName,
-      'X-Findtime-Surface': 'mcp',
-      ...(request.headers || {}),
-      ...attributionHeaders({ ...attribution, toolName, mcpServerVersion: SERVER_VERSION })
+      ...(request.headers || {})
     };
 
     if (typeof apiKey === 'string' && apiKey.trim()) {
       headers.Authorization = `Bearer ${apiKey.trim()}`;
     }
 
-    const clientUserId = attribution.installationId;
+    const clientUserId = getMcpClientId();
     if (typeof clientUserId === 'string' && clientUserId.trim()) {
       headers['X-Findtime-User-ID'] = clientUserId.trim();
     }
@@ -1529,79 +1551,6 @@ function createFindtimeMcpServer(options = {}) {
     return results.slice(0, 3);
   }
 
-  async function fetchMissSummary(requestMetadata) {
-    const adminKey = firstNonEmpty(process.env[MISS_ADMIN_KEY_ENV]);
-    if (!adminKey) {
-      return {
-        available: false,
-        reason: 'admin_key_required',
-        adminKeyEnv: MISS_ADMIN_KEY_ENV
-      };
-    }
-    try {
-      const summaryResponse = await fetchJson('get_api_diagnostics', {
-        path: '/mcp/miss-summary',
-        params: new URLSearchParams(),
-        headers: { 'X-Findtime-Miss-Admin-Key': adminKey }
-      }, requestMetadata);
-      if (summaryResponse.ok && summaryResponse.parsedBody && typeof summaryResponse.parsedBody === 'object') {
-        const body = summaryResponse.parsedBody;
-        return {
-          available: true,
-          source: 'time-api',
-          retentionDays: body.retentionDays,
-          eventCount: body.eventCount,
-          byErrorClass: body.byErrorClass,
-          byTool: body.byTool
-        };
-      }
-    } catch (_error) {
-      // Counts stay unavailable rather than falling back to query-bearing buffers.
-    }
-    return {
-      available: false,
-      reason: 'summary_unavailable',
-      adminKeyEnv: MISS_ADMIN_KEY_ENV
-    };
-  }
-
-  async function postMissEvents(events) {
-    if (options.missLog || !Array.isArray(events) || events.length === 0) return;
-    if (isDroppedMissTraffic(missTrafficContext)) return;
-    const clientId = getMcpClientId();
-    await Promise.all(events.map((event) => fetchJson('send_feedback', {
-      method: 'POST',
-      path: '/mcp/miss',
-      params: new URLSearchParams(),
-      body: {
-        ...toRemoteMissEvent(event, clientId),
-        clientType: missTrafficContext.clientType,
-        trafficType: missTrafficContext.trafficType,
-        internalQa: missTrafficContext.internalQa,
-        accountEmailHash: missTrafficContext.accountEmailHash || undefined
-      }
-    })));
-  }
-
-  async function recordToolMiss(toolName, toolArgs, result, error = null, { remote = true } = {}) {
-    try {
-      const recorded = await localMissLog.record({
-        ...missTrafficContext,
-        tool: toolName,
-        args: scrubToolArgs(toolArgs || {}),
-        result,
-        error,
-        payload: result && result.structuredContent,
-        clientId: getMcpClientId()
-      });
-      if (!recorded.dropped && remote) {
-        await postMissEvents(recorded.events);
-      }
-    } catch (_error) {
-      // Miss-log writes must never fail the tool response.
-    }
-  }
-
   async function toActionableApiError(toolName, toolArgs, apiResponse, extra = {}) {
     let extraCandidates = extra.extraCandidates || [];
     const parsed = apiResponse.parsedBody && typeof apiResponse.parsedBody === 'object'
@@ -1677,35 +1626,22 @@ function createFindtimeMcpServer(options = {}) {
         recorded: true,
         errorClass: 'agent_feedback',
         tool: String(toolArgs.tool || '').trim(),
-        message: 'Feedback counted on the 90-day miss log. Query text was discarded and is not stored.'
+        message: 'Feedback sent to findtime.io. Only the tool name was sent; the query text was discarded.'
       };
-      await recordToolMiss(toolArgs.tool || name, {
-        tool: toolArgs.tool
-      }, {
-        structuredContent: feedbackPayload
-      }, null, { remote: false });
-      if (!options.missLog) {
-        const feedbackResponse = await fetchJson(name, {
-          method: 'POST',
-          path: '/mcp/feedback',
-          params: new URLSearchParams(),
-          body: {
-            tool: feedbackPayload.tool,
-            clientId: getMcpClientId(),
-            clientType: missTrafficContext.clientType,
-            trafficType: missTrafficContext.trafficType,
-            internalQa: missTrafficContext.internalQa,
-            accountEmailHash: missTrafficContext.accountEmailHash || undefined
-          }
-        }, requestMetadata).catch(() => ({ ok: false }));
-        // A missing or rejected API key means the report never reached findtime.io; say so.
-        if (feedbackResponse && (feedbackResponse.status === 401 || feedbackResponse.status === 403)) {
-          return buildActionableErrorResult({
-            toolName: name,
-            args: { tool: feedbackPayload.tool },
-            apiResponse: feedbackResponse
-          });
-        }
+      // Only the tool name leaves this process.
+      const feedbackResponse = await fetchJson(name, {
+        method: 'POST',
+        path: '/mcp/feedback',
+        params: new URLSearchParams(),
+        body: { tool: feedbackPayload.tool }
+      }, requestMetadata).catch(() => ({ ok: false }));
+      // A missing or rejected API key means the report never reached findtime.io; say so.
+      if (feedbackResponse && (feedbackResponse.status === 401 || feedbackResponse.status === 403)) {
+        return buildActionableErrorResult({
+          toolName: name,
+          args: { tool: feedbackPayload.tool },
+          apiResponse: feedbackResponse
+        });
       }
       return {
         content: [{ type: 'text', text: feedbackPayload.message }],
@@ -1715,10 +1651,9 @@ function createFindtimeMcpServer(options = {}) {
 
     if (name === 'get_api_diagnostics') {
       const request = tool.buildRequest(toolArgs);
-      const [apiResponse, latestMcpVersionCheck, missLog] = await Promise.all([
+      const [apiResponse, latestMcpVersionCheck] = await Promise.all([
         fetchJson(name, request, requestMetadata),
-        fetchLatestMcpVersion(),
-        fetchMissSummary(requestMetadata)
+        fetchLatestMcpVersion()
       ]);
       const checkedAt = new Date().toISOString();
       const latestVersion = latestMcpVersionCheck.latestVersion || null;
@@ -1747,8 +1682,7 @@ function createFindtimeMcpServer(options = {}) {
         ) || null,
         apiHealthUrl: apiResponse.url,
         apiStatus: apiResponse.status,
-        apiReachable: apiResponse.ok,
-        missLog
+        apiReachable: apiResponse.ok
       };
 
       if (apiResponse.ok) {
@@ -1865,12 +1799,6 @@ function createFindtimeMcpServer(options = {}) {
 
     try {
       if (method === 'initialize') {
-        const clientInfo = message.params && message.params.clientInfo;
-        Object.assign(attribution, normalizeAttribution({
-          ...attribution,
-          clientName: clientInfo && clientInfo.name || attribution.clientName,
-          clientVersion: clientInfo && clientInfo.version || attribution.clientVersion
-        }));
         state.initialized = true;
         state.protocolVersion = negotiateProtocolVersion(message.params && message.params.protocolVersion);
 
@@ -1914,9 +1842,6 @@ function createFindtimeMcpServer(options = {}) {
         const startedAt = Date.now();
         try {
           const result = await callTool(toolName, toolArgs);
-          if (toolName !== 'send_feedback' && toolName !== 'get_api_diagnostics' && toolName !== 'get_findtime_help') {
-            scheduleTracking(() => recordToolMiss(toolName, toolArgs, result));
-          }
           scheduleTracking(() => recordMcpUsageTelemetry({
             toolName,
             args: scrubToolArgs(toolArgs),
@@ -1925,9 +1850,6 @@ function createFindtimeMcpServer(options = {}) {
           }));
           return createSuccessResponse(message.id, result);
         } catch (toolError) {
-          if (Number(toolError && toolError.code) !== -32602) {
-            scheduleTracking(() => recordToolMiss(toolName, toolArgs, null, toolError));
-          }
           scheduleTracking(() => recordMcpUsageTelemetry({
             toolName,
             args: scrubToolArgs(toolArgs),
