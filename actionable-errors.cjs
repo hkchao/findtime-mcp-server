@@ -14,9 +14,12 @@ function formatCandidate(item) {
   const countryName = compactText(item.countryName || item.country);
   const timezoneIana = compactText(item.timezoneIana || item.iana);
   const label = compactText(item.label);
+  const region = compactText(item.admin1 || item.stateCode);
+  // Without a name, fall back to the region and country, then the id: never "undefined".
   const suggestedQuery = compactText(item.suggestedQuery)
-    || (name && (item.admin1 || item.stateCode) ? `${item.name}, ${item.admin1 || item.stateCode}` : '')
-    || (name && countryName ? `${name}, ${countryName}` : name || timezoneIana);
+    || (name && region ? `${name}, ${region}` : '')
+    || (name && countryName ? `${name}, ${countryName}` : name || timezoneIana)
+    || [region, countryName].filter(Boolean).join(', ');
   const suggestedId = compactText(item.suggestedId || item.id || item.iana);
   if (!suggestedQuery && !suggestedId) return null;
   // A timezone candidate stands for a group of equivalent zones: say which
@@ -26,7 +29,7 @@ function formatCandidate(item) {
     : [];
   const places = compactText(item.places);
   return {
-    name: name || suggestedQuery,
+    name: name || suggestedQuery || suggestedId,
     label: label || null,
     countryName: countryName || null,
     timezoneIana: timezoneIana || null,

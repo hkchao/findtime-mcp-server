@@ -226,3 +226,39 @@ test('a saved-group teamId without locations points to the hosted connector', as
   assert.match(result.content[0].text, /mcp\.findtime\.io\/mcp/);
   assert.equal(toolCalls(calls, 'find_meeting_time').length, 0);
 });
+
+test('meeting tools reject the are_they_awake city aliases instead of sending no cities', async () => {
+  const cases = {
+    find_meeting_time: {},
+    check_proposed_time: { start: '2026-11-03T09:00', home: 'Europe/London' },
+    rank_recurring_slot: { weekday: 'Monday', time: '9am', home: 'Europe/London' }
+  };
+  for (const [name, base] of Object.entries(cases)) {
+    for (const alias of [{ theirCities: ['London', 'Tokyo'] }, { theirCity: 'Tokyo' }, { teamId: 'Marketing', theirCities: ['London'] }]) {
+      const calls = [];
+      const result = await callTool(makeServer(calls), name, { ...base, ...alias });
+      assert.equal(result.isError, true, `${name} ${JSON.stringify(alias)}`);
+      assert.match(result.content[0].text, /takes locations/, name);
+      assert.notEqual(result.structuredContent && result.structuredContent.errorClass, 'teams_not_persisted', name);
+      assert.equal(calls.length, 0, name);
+    }
+  }
+});
+
+test('meeting tools still send locations when an alias is also present', async () => {
+  const calls = [];
+  const result = await callTool(makeServer(calls), 'find_meeting_time', { locations: ['London', 'Tokyo'], theirCity: 'Paris' });
+  assert.equal(result.isError, undefined);
+  const [call] = toolCalls(calls, 'find_meeting_time');
+  assert.equal(call.url.searchParams.get('locations'), 'London|Tokyo');
+});
+
+test('are_they_awake still accepts theirCities and theirCity', async () => {
+  for (const args of [{ theirCities: ['Bengaluru'] }, { theirCity: 'Bengaluru' }]) {
+    const calls = [];
+    const result = await callTool(makeServer(calls), 'are_they_awake', { ...args, myTimezone: 'America/Los_Angeles' });
+    assert.equal(result.isError, undefined);
+    const [call] = toolCalls(calls, 'are_they_awake');
+    assert.equal(call.url.searchParams.get(Object.keys(args)[0]), 'Bengaluru');
+  }
+});

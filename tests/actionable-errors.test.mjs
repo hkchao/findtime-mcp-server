@@ -180,3 +180,17 @@ test('city candidates without group fields keep their old shape', () => {
   });
   assert.deepEqual(Object.keys(candidate).sort(), ['countryName', 'label', 'name', 'suggestedId', 'suggestedQuery', 'timezoneIana']);
 });
+
+test('candidates without a name never show undefined', () => {
+  const candidates = extractCandidates({
+    candidates: [
+      { city: 'Springfield', admin1: 'Illinois', id: 'a' },
+      { label: 'Portland', stateCode: 'OR', id: 'b' },
+      { admin1: 'Ontario', countryName: 'Canada', id: 'c' },
+      { id: 'd' }
+    ]
+  });
+  assert.deepEqual(candidates.map((c) => c.suggestedQuery), ['Springfield, Illinois', 'Portland, OR', 'Ontario, Canada', null]);
+  assert.deepEqual(candidates.map((c) => c.name), ['Springfield', 'Portland', 'Ontario, Canada', 'd']);
+  for (const candidate of candidates) assert.equal(JSON.stringify(candidate).includes('undefined'), false);
+});

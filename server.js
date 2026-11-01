@@ -411,9 +411,7 @@ const TOOL_DEFINITIONS = [
       additionalProperties: false
     },
     buildRequest(args) {
-      if (!hasLocations(args)) {
-        throw invalidParamsError('find_meeting_time requires locations.');
-      }
+      requireMeetingLocations(args, 'find_meeting_time');
       const params = new URLSearchParams();
       setParam(params, 'locations', args.locations, { joinArraysWith: '|' });
       setParam(params, 'countryCodes', args.countryCodes, { joinArraysWith: '|' });
@@ -453,9 +451,7 @@ const TOOL_DEFINITIONS = [
     },
     buildRequest(args) {
       ensureRequired(args, ['start'], 'check_proposed_time requires start.');
-      if (!hasLocations(args)) {
-        throw invalidParamsError('check_proposed_time requires locations.');
-      }
+      requireMeetingLocations(args, 'check_proposed_time');
       const params = new URLSearchParams();
       setParam(params, 'locations', args.locations, { joinArraysWith: '|' });
       setParam(params, 'countryCodes', args.countryCodes, { joinArraysWith: '|' });
@@ -527,9 +523,7 @@ const TOOL_DEFINITIONS = [
     },
     buildRequest(args) {
       ensureRequired(args, ['weekday', 'time', 'home'], 'rank_recurring_slot requires weekday, time, and home.');
-      if (!hasLocations(args)) {
-        throw invalidParamsError('rank_recurring_slot requires locations.');
-      }
+      requireMeetingLocations(args, 'rank_recurring_slot');
       const params = new URLSearchParams();
       setParam(params, 'locations', args.locations, { joinArraysWith: '|' });
       setParam(params, 'countryCodes', args.countryCodes, { joinArraysWith: '|' });
@@ -1216,11 +1210,31 @@ function presentLocationValue(value) {
   return typeof value === 'string' && value.trim().length > 0;
 }
 
-function hasLocations(args) {
+// theirCities and theirCity belong to are_they_awake. The other meeting tools
+// forward only locations, so only locations counts for them.
+const AWAKE_LOCATION_ALIASES = ['theirCities', 'theirCity'];
+
+function hasLocations(args, toolName) {
   if (!args) return false;
-  return presentLocationValue(args.locations)
-    || presentLocationValue(args.theirCities)
-    || presentLocationValue(args.theirCity);
+  if (presentLocationValue(args.locations)) return true;
+  return toolName === 'are_they_awake'
+    && AWAKE_LOCATION_ALIASES.some((key) => presentLocationValue(args[key]));
+}
+
+function misplacedLocationAliases(args, toolName) {
+  if (!args || toolName === 'are_they_awake' || presentLocationValue(args.locations)) return [];
+  return AWAKE_LOCATION_ALIASES.filter((key) => presentLocationValue(args[key]));
+}
+
+function requireMeetingLocations(args, toolName) {
+  const misplaced = misplacedLocationAliases(args, toolName);
+  if (misplaced.length) {
+    throw invalidParamsError(`${toolName} takes locations, not ${misplaced.join(' or ')}. `
+      + `${misplaced.join(' and ')} only work with are_they_awake. Pass the same cities as locations.`);
+  }
+  if (!hasLocations(args, toolName)) {
+    throw invalidParamsError(`${toolName} requires locations.`);
+  }
 }
 
 function teamStubResult(teamId, toolName) {
@@ -1590,7 +1604,8 @@ function createFindtimeMcpServer(options = {}) {
     };
 
     if (PASTE_TOOL_NAMES.has(name) && String(toolArgs.teamId || '').trim()) {
-      if (hasLocations(toolArgs)) {
+      // Misplaced aliases fall through to the tool's own error, not the saved-group answer.
+      if (hasLocations(toolArgs, name) || misplacedLocationAliases(toolArgs, name).length) {
         delete toolArgs.teamId;
       } else {
         return teamStubResult(toolArgs.teamId, name);
