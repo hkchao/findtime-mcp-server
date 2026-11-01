@@ -12,6 +12,7 @@ Published surfaces:
 - GitHub: `https://github.com/hkchao/findtime-mcp-server`
 - Official MCP Registry: `https://registry.modelcontextprotocol.io/?q=io.github.hkchao%2Ffindtime-mcp-server`
 - MCP Registry name: `io.github.hkchao/findtime-mcp-server`
+- Hosted server: `https://mcp.findtime.io/mcp` (Streamable HTTP, OAuth sign-in). It includes the time tools plus booking tools (request, reschedule and cancel bookings; host approve/decline; booking pages and invite links; saved teams). The npm package covers the time tools only and needs `FINDTIME_TIME_API_KEY`.
 
 ## Tool surface
 
