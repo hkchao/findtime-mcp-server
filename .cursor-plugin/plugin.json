@@ -1,0 +1,20 @@
+{
+  "name": "findtime-io",
+  "version": "1.0.0",
+  "description": "Time zones, meeting planning, saved groups, and confirmed booking requests with findtime.io.",
+  "author": {
+    "name": "findtime.io",
+    "email": "contact@findtime.io"
+  },
+  "homepage": "https://findtime.io",
+  "repository": "https://github.com/hkchao/findtime-mcp-server",
+  "license": "MIT",
+  "keywords": [
+    "time-zones",
+    "scheduling",
+    "meetings",
+    "booking"
+  ],
+  "logo": "assets/logo.png",
+  "skills": []
+}

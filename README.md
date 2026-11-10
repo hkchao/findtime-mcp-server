@@ -110,7 +110,27 @@ Privacy contract: `_endUserId` must be an opaque token supplied by the MCP host,
 
 The server validates `_endUserId` defensively: it must be a string, at most 256 characters, and must not contain CR, LF, or other control characters. The raw value is never logged by the server.
 
-### Cursor
+### Cursor Marketplace plugin
+
+This repository also packages the hosted findtime.io connector as a Cursor plugin. The manifest lives in `.cursor-plugin/plugin.json`, and `mcp.json` connects to `https://mcp.findtime.io/mcp`.
+
+After installing the plugin in Cursor, enable its MCP server and complete Google OAuth when prompted. The hosted service supports time queries, meeting planning, saved location groups, and booking tools. Preview booking changes and confirm the returned details before sending or cancelling a request. Hosts approve or decline requests separately.
+
+For manual hosted setup, add the following to your Cursor MCP configuration.
+
+```json
+{
+  "mcpServers": {
+    "findtime": {
+      "url": "https://mcp.findtime.io/mcp"
+    }
+  }
+}
+```
+
+The API-key instructions below apply to the local npm server. Hosted setup and permissions are documented at https://findtime.io/developers/mcp/.
+
+### Cursor stdio configuration
 
 ```json
 {
